@@ -53,7 +53,7 @@ public class DalamudReleases
     
     private async Task<DalamudVersionInfo?> GetVersionInfoForTrackAsync(string track)
     {
-        var dalamudTrack = "release";
+        var dalamudTrack = "staging";
         if (this.overrides != null && this.overrides.ChannelTracks.TryGetValue(track, out var mapping))
         {
             dalamudTrack = mapping;
