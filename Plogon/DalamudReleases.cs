@@ -7,6 +7,9 @@ using System.Net.Http.Json;
 using System.Threading.Tasks;
 using Serilog;
 using Tomlyn;
+using SharpCompress.Archives;
+using SharpCompress.Common;
+using SharpCompress.Readers;
 
 namespace Plogon;
 
@@ -85,8 +88,19 @@ public class DalamudReleases
 
         // Extract the zip file to the extractDir
         using var zipStream = new MemoryStream(zipBytes);
-        using var archive = new ZipArchive(zipStream);
-        archive.ExtractToDirectory(extractDir.FullName);
+        // using var archive = new ZipArchive(zipStream);
+        // archive.ExtractToDirectory(extractDir.FullName);
+        var output = extractDir.FullName;
+        using (var archive = new ArchiveFactory(zipBytes))
+        {
+            var reader = archive.ExtractAllEntries();
+
+            while (reader.MoveToNextEntry())
+            {
+                if (!reader.Entry.IsDirectory)
+                    reader.WriteEntryToDirectory(output, new ExtractionOptions() { ExtractFullPath = true, Overwrite = true });
+            }
+        }
 
         return extractDir;
     }
