@@ -44,7 +44,7 @@ public class DiscordWebhook
             .WithColor(color)
             .WithTitle(title)
             .WithFooter(footer)
-            .WithDescription(message)
+            .WithDescription(message[..4096])
             .Build();
 
         var time = GetPacificStandardTime();
