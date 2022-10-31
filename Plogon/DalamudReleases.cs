@@ -15,7 +15,7 @@ namespace Plogon;
 /// </summary>
 public class DalamudReleases
 {
-    private const string URL_TEMPLATE = "https://kamori.goats.dev/Dalamud/Release/VersionInfo?track={0}";
+    private const string URL_TEMPLATE = "https://aonyx.ffxiv.wang/Dalamud/Release/VersionInfo?track={0}";
 
     private readonly Overrides? overrides;
     
