@@ -91,7 +91,7 @@ public class DalamudReleases
         // using var archive = new ZipArchive(zipStream);
         // archive.ExtractToDirectory(extractDir.FullName);
         var output = extractDir.FullName;
-        using (var archive = new ArchiveFactory(zipBytes))
+        using (var archive = ArchiveFactory.Open(zipStream))
         {
             var reader = archive.ExtractAllEntries();
 
