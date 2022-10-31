@@ -23,12 +23,12 @@ public class DiscordWebhook
         this.Client = new DiscordWebhookClient(Environment.GetEnvironmentVariable("DISCORD_WEBHOOK"));
     }
 
-    private static DateTime GetPacificStandardTime()
+    private static DateTime GetChinaStandardTime()
     {
         var utc = DateTime.UtcNow;
-        var pacificZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Shanghai");
-        var pacificTime = TimeZoneInfo.ConvertTimeFromUtc(utc, pacificZone);
-        return pacificTime;
+        var chinaStandardZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Shanghai");
+        var chinaStandardTime = TimeZoneInfo.ConvertTimeFromUtc(utc, chinaStandardZone);
+        return chinaStandardTime;
     }
     
     /// <summary>
@@ -47,7 +47,7 @@ public class DiscordWebhook
             .WithDescription(message[..4096])
             .Build();
 
-        var time = GetPacificStandardTime();
+        var time = GetChinaStandardTime();
         var username = "Odder";
         var avatarUrl = "https://ottercorp.github.io/icons/odder.png";
         if (time.Hour is > 20 or < 7)
