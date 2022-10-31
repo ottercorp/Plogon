@@ -26,7 +26,7 @@ public class DiscordWebhook
     private static DateTime GetPacificStandardTime()
     {
         var utc = DateTime.UtcNow;
-        var pacificZone = TimeZoneInfo.FindSystemTimeZoneById("America/Los_Angeles");
+        var pacificZone = TimeZoneInfo.FindSystemTimeZoneById("Asia/Shanghai");
         var pacificTime = TimeZoneInfo.ConvertTimeFromUtc(utc, pacificZone);
         return pacificTime;
     }
@@ -48,12 +48,12 @@ public class DiscordWebhook
             .Build();
 
         var time = GetPacificStandardTime();
-        var username = "Plo";
-        var avatarUrl = "https://goatcorp.github.io/icons/plo.png";
+        var username = "Odder";
+        var avatarUrl = "https://ottercorp.github.io/icons/odder.png";
         if (time.Hour is > 20 or < 7)
         {
-            username = "Gon";
-            avatarUrl = "https://goatcorp.github.io/icons/gon.png";
+            username = "Otter";
+            avatarUrl = "https://ottercorp.github.io/icons/otter.png";
         }
         
         return await this.Client.SendMessageAsync(embeds: new[] { embed }, username: username, avatarUrl: avatarUrl);
