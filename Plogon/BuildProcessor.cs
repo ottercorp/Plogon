@@ -45,12 +45,16 @@ public class BuildProcessor
     private ManifestStorage manifestStorage;
     private DalamudReleases dalamudReleases;
 
+    private bool needExtendedImage;
+
     private const string DOCKER_IMAGE = "mcr.microsoft.com/dotnet/sdk";
     private const string DOCKER_TAG = "6.0.300";
     // This has to match the SDK's version identified by DOCKER_TAG
     // See https://dotnet.microsoft.com/en-us/download/dotnet/6.0 for a mapping of SDK version <-> Runtime version
     private const string RUNTIME_VERSION = "6.0.5";
 
+    private const string EXTENDED_IMAGE_HASH = "38f9afcc7475646604cba1fe5a63333f7443097f390604295c982a00740f35c6";
+    
     /// <summary>
     /// Set up build processor
     /// </summary>
@@ -82,6 +86,44 @@ public class BuildProcessor
     /// <returns>List of images</returns>
     public async Task<List<ImageInspectResponse>> SetupDockerImage()
     {
+        if (needExtendedImage)
+        {
+            using var client = new HttpClient();
+
+            var cacheFolder = new DirectoryInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".plogon_cache"));
+            if (!cacheFolder.Exists)
+                cacheFolder.Create();
+            
+            var imageFile = new FileInfo(Path.Combine(cacheFolder.FullName, "extended-image.tar.bz2"));
+            Stream? loadStream = null;
+            if (imageFile.Exists)
+            {
+                loadStream = File.OpenRead(imageFile.FullName);
+                Log.Information("Opened extended image from cache: {Path}", imageFile.FullName);
+            }
+            else
+            {
+                var url = Environment.GetEnvironmentVariable("EXTENDED_IMAGE_LINK");
+                using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+                await using var streamToReadFrom = await response.Content.ReadAsStreamAsync();
+                
+                await using Stream streamToWriteTo = File.Open(imageFile.FullName, FileMode.Create);
+                
+                await streamToReadFrom.CopyToAsync(streamToWriteTo);
+                streamToWriteTo.Close();
+                
+                loadStream = File.OpenRead(imageFile.FullName);
+                Log.Information("Downloaded extended image to cache: {Path}", imageFile.FullName);
+            }
+
+            await this.dockerClient.Images.LoadImageAsync(new ImageLoadParameters(), loadStream,
+                new Progress<JSONMessage>(progress =>
+                {
+                    Log.Verbose("Docker image load ({Id}): {Status}", progress.ID, progress.Status);
+                }));
+        }
+        
         await this.dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
             {
                 FromImage = DOCKER_IMAGE,
@@ -159,6 +201,8 @@ public class BuildProcessor
             }
         }
 
+        needExtendedImage = tasks.Any(x => x.Manifest?.Build?.Image == "extended");
+
         return tasks;
     }
 
@@ -220,6 +264,34 @@ public class BuildProcessor
         
         // fetch runtime packages
         await Task.WhenAll(runtimeDependencies.Select(dependency => GetDependency(dependency.Item1, new() { Resolved = dependency.Item2 }, pkgFolder, client)));
+    }
+
+    async Task GetNeeds(BuildTask task, DirectoryInfo needs)
+    {
+        if (task.Manifest?.Build?.Needs == null || !task.Manifest.Build.Needs.Any())
+            return;
+        
+        using var client = new HttpClient();
+
+        foreach (var need in task.Manifest!.Build!.Needs)
+        {
+            using var response = await client.GetAsync(need.Url, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            await using var streamToReadFrom = await response.Content.ReadAsStreamAsync();
+
+            if (need.Dest!.Contains(".."))
+                throw new Exception();
+            
+            var fileToWriteTo = Path.Combine(needs.FullName, need.Dest!);
+            {
+                await using Stream streamToWriteTo = File.Open(fileToWriteTo, FileMode.Create);
+            
+                await streamToReadFrom.CopyToAsync(streamToWriteTo);
+                streamToWriteTo.Close();
+            }
+            
+            Log.Information("Downloaded need {Url} to {Dest}", need.Url, need.Dest);
+        }
     }
 
     private class HasteResponse
@@ -440,6 +512,7 @@ public class BuildProcessor
         var work = this.workFolder.CreateSubdirectory($"{folderName}-work");
         var output = this.workFolder.CreateSubdirectory($"{folderName}-output");
         var packages = this.workFolder.CreateSubdirectory($"{folderName}-packages");
+        var needs = this.workFolder.CreateSubdirectory($"{folderName}-needs");
 
         Debug.Assert(staticFolder.Exists);
 
@@ -488,12 +561,14 @@ public class BuildProcessor
 
         var dalamudAssemblyDir = await this.dalamudReleases.GetDalamudAssemblyDirAsync(task.Channel);
 
+        await GetNeeds(task, needs);
         await RestoreAllPackages(task, work, packages);
+        var needsExtendedImage = task.Manifest?.Build?.Image == "extended";
         
         var containerCreateResponse = await this.dockerClient.Containers.CreateContainerAsync(
             new CreateContainerParameters
             {
-                Image = $"{DOCKER_IMAGE}:{DOCKER_TAG}",
+                Image = needsExtendedImage ? EXTENDED_IMAGE_HASH : $"{DOCKER_IMAGE}:{DOCKER_TAG}",
                 
                 NetworkDisabled = true,
 
@@ -511,11 +586,12 @@ public class BuildProcessor
                         $"{staticFolder.FullName}:/static:ro",
                         $"{output.FullName}:/output",
                         $"{packages.FullName}:/packages:ro",
+                        $"{needs.FullName}:/needs:ro"
                     }
                 },
                 Env = new List<string>
                 {
-                    $"PLOGON_PROJECT_DIR={task.Manifest.Plugin.ProjectPath}",
+                    $"PLOGON_PROJECT_DIR={task.Manifest!.Plugin.ProjectPath}",
                     $"PLOGON_PLUGIN_NAME={task.InternalName}",
                     $"PLOGON_PLUGIN_COMMIT={task.Manifest.Plugin.Commit}",
                     $"PLOGON_PLUGIN_VERSION={task.Manifest.Plugin.Version}",
