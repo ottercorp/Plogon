@@ -30,7 +30,7 @@ public class DiscordWebhook
         var chinaStandardTime = TimeZoneInfo.ConvertTimeFromUtc(utc, chinaStandardZone);
         return chinaStandardTime;
     }
-    
+
     /// <summary>
     /// Send a webhook
     /// </summary>
@@ -40,11 +40,15 @@ public class DiscordWebhook
     /// <param name="footer"></param>
     public async Task<ulong> Send(Color color, string message, string title, string footer)
     {
+        if (message.Length > 4000)
+        {
+            message = message.Substring(0, 4000);
+        }
         var embed = new EmbedBuilder()
             .WithColor(color)
             .WithTitle(title)
             .WithFooter(footer)
-            .WithDescription(message[..4096])
+            .WithDescription(message)
             .Build();
 
         var time = GetChinaStandardTime();
@@ -55,7 +59,7 @@ public class DiscordWebhook
             username = "Otter";
             avatarUrl = "https://ottercorp.github.io/icons/otter.png";
         }
-        
+
         return await this.Client.SendMessageAsync(embeds: new[] { embed }, username: username, avatarUrl: avatarUrl);
     }
 }
