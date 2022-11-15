@@ -30,7 +30,7 @@ class Program
         SetupLogging();
 
         var webhook = new DiscordWebhook();
-        var webservices = new WebServices();
+        // var webservices = new WebServices();
         
         var githubSummary = "## Build Summary\n";
         GitHubOutputBuilder.SetActive(ci);
@@ -211,8 +211,8 @@ class Program
                                 buildsMd.AddRow("✔️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
                                     $"v{status.Version} - [Diff]({status.DiffUrl})");
 
-                                if (!string.IsNullOrEmpty(prNumber) && !commit)
-                                    await webservices.RegisterPrNumber(task.InternalName, status.Version!, prNumber);
+                                // if (!string.IsNullOrEmpty(prNumber) && !commit)
+                                //     await webservices.RegisterPrNumber(task.InternalName, status.Version!, prNumber);
                             }
                         }
                         else
@@ -263,8 +263,9 @@ class Program
 
                 if (repoName != null && prNumber != null)
                 {
-                    var existingMessages = await webservices.GetMessageIds(prNumber);
-                    var alreadyPosted = existingMessages.Length > 0;
+                    // var existingMessages = await webservices.GetMessageIds(prNumber);
+                    // var alreadyPosted = existingMessages.Length > 0;
+                    var alreadyPosted = false;
 
                     var links =
                         $"[Show log](https://github.com/ottercorp/DalamudPluginsD17/actions/runs/{actionRunId}) - [Review](https://github.com/ottercorp/DalamudPluginsD17/pull/{prNumber}/files#submit-review)";
@@ -310,7 +311,7 @@ class Program
                     var id = await webhook.Send(ok ? Color.Purple : Color.Red,
                         $"{buildInfo}\n\n{links} - [PR](https://github.com/ottercorp/DalamudPluginsD17/pull/{prNumber})",
                         hookTitle, ok ? "Accepted" : "Rejected");
-                    await webservices.RegisterMessageId(prNumber!, id);
+                    // await webservices.RegisterMessageId(prNumber!, id);
                 }
 
                 if (repoName != null && commit && anyTried)
@@ -320,63 +321,63 @@ class Program
                         "Builds committed", string.Empty);
 
                     // TODO: We don't support this for removals for now
-                    foreach (var buildResult in statuses.Where(x => x.Task.Type == BuildTask.TaskType.Build))
-                    {
-                        if (!buildResult.Success && !aborted)
-                            continue;
+                    // foreach (var buildResult in statuses.Where(x => x.Task.Type == BuildTask.TaskType.Build))
+                    // {
+                    //     if (!buildResult.Success && !aborted)
+                    //         continue;
 
-                        var resultPrNum =
-                            await webservices.GetPrNumber(buildResult.Task.InternalName, buildResult.Version!);
-                        if (resultPrNum == null)
-                        {
-                            Log.Warning("No PR for {InternalName} - {Version}", buildResult.Task.InternalName,
-                                buildResult.Version);
-                            continue;
-                        }
+                    //     var resultPrNum =
+                    //         await webservices.GetPrNumber(buildResult.Task.InternalName, buildResult.Version!);
+                    //     if (resultPrNum == null)
+                    //     {
+                    //         Log.Warning("No PR for {InternalName} - {Version}", buildResult.Task.InternalName,
+                    //             buildResult.Version);
+                    //         continue;
+                    //     }
 
-                        try
-                        {
-                            var msgIds = await webservices.GetMessageIds(resultPrNum);
+                    //     try
+                    //     {
+                    //         var msgIds = await webservices.GetMessageIds(resultPrNum);
 
-                            foreach (var id in msgIds)
-                            {
-                                await webhook.Client.ModifyMessageAsync(ulong.Parse(id), properties =>
-                                {
-                                    var embed = properties.Embeds.Value.First();
-                                    var newEmbed = new EmbedBuilder()
-                                        .WithColor(Color.LightGrey)
-                                        .WithTitle(embed.Title)
-                                        .WithCurrentTimestamp()
-                                        .WithDescription(embed.Description);
+                    //         foreach (var id in msgIds)
+                    //         {
+                    //             await webhook.Client.ModifyMessageAsync(ulong.Parse(id), properties =>
+                    //             {
+                    //                 var embed = properties.Embeds.Value.First();
+                    //                 var newEmbed = new EmbedBuilder()
+                    //                     .WithColor(Color.LightGrey)
+                    //                     .WithTitle(embed.Title)
+                    //                     .WithCurrentTimestamp()
+                    //                     .WithDescription(embed.Description);
 
-                                    if (embed.Author.HasValue)
-                                        newEmbed = newEmbed.WithAuthor(embed.Author.Value.Name,
-                                            embed.Author.Value.IconUrl,
-                                            embed.Author.Value.Url);
+                    //                 if (embed.Author.HasValue)
+                    //                     newEmbed = newEmbed.WithAuthor(embed.Author.Value.Name,
+                    //                         embed.Author.Value.IconUrl,
+                    //                         embed.Author.Value.Url);
 
-                                    if (embed.Footer.HasValue)
-                                    {
-                                        if (embed.Footer.Value.Text.Contains("Comment"))
-                                        {
-                                            newEmbed = newEmbed.WithFooter(
-                                                embed.Footer.Value.Text.Replace("Comment", "Committed"),
-                                                embed.Footer.Value.IconUrl);
-                                        }
-                                        else
-                                        {
-                                            newEmbed = newEmbed.WithFooter("Committed");
-                                        }
-                                    }
+                    //                 if (embed.Footer.HasValue)
+                    //                 {
+                    //                     if (embed.Footer.Value.Text.Contains("Comment"))
+                    //                     {
+                    //                         newEmbed = newEmbed.WithFooter(
+                    //                             embed.Footer.Value.Text.Replace("Comment", "Committed"),
+                    //                             embed.Footer.Value.IconUrl);
+                    //                     }
+                    //                     else
+                    //                     {
+                    //                         newEmbed = newEmbed.WithFooter("Committed");
+                    //                     }
+                    //                 }
 
-                                    properties.Embeds = new[] { newEmbed.Build() };
-                                });
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.Error(ex, "Could not update messages");
-                        }
-                    }
+                    //                 properties.Embeds = new[] { newEmbed.Build() };
+                    //             });
+                    //         }
+                    //     }
+                    //     catch (Exception ex)
+                    //     {
+                    //         Log.Error(ex, "Could not update messages");
+                    //     }
+                    // }
                 }
             }
         }
