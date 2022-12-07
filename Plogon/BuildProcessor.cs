@@ -53,7 +53,7 @@ public class BuildProcessor
     // See https://dotnet.microsoft.com/en-us/download/dotnet/6.0 for a mapping of SDK version <-> Runtime version
     private const string RUNTIME_VERSION = "6.0.5";
 
-    private const string EXTENDED_IMAGE_HASH = "38f9afcc7475646604cba1fe5a63333f7443097f390604295c982a00740f35c6";
+    private const string EXTENDED_IMAGE_HASH = "c753fc1c28969c4d8bdcccc0b09d1f3b71643584d0c2852ddf848bd20f7a976c";
     
     /// <summary>
     /// Set up build processor
