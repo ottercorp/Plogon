@@ -53,7 +53,7 @@ public class BuildProcessor
     // See https://dotnet.microsoft.com/en-us/download/dotnet/6.0 for a mapping of SDK version <-> Runtime version
     private const string RUNTIME_VERSION = "6.0.5";
 
-    private const string EXTENDED_IMAGE_HASH = "c753fc1c28969c4d8bdcccc0b09d1f3b71643584d0c2852ddf848bd20f7a976c";
+    private const string EXTENDED_IMAGE_HASH = "f2c4a5661854d0dfde2b37c5fde3f222bc225678d5ec3e96ceaf17c6b7727ed8";
     
     /// <summary>
     /// Set up build processor
@@ -143,6 +143,7 @@ public class BuildProcessor
         foreach (var imagesListResponse in images)
         {
             var inspect = await this.dockerClient.Images.InspectImageAsync(imagesListResponse.ID);
+            Log.Verbose("Docker image id: {Id}", imagesListResponse.ID);
             inspects.Add(inspect);
         }
 
