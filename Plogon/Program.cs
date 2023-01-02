@@ -11,7 +11,7 @@ namespace Plogon;
 
 class Program
 {
-    private static readonly string[] AlwaysBuildUsers = new[] { "goaaats", "Bluefissure", "MapleRecall" };
+    private static readonly string[] AlwaysBuildUsers = new[] { "goaaats", "Bluefissure", "MapleRecall", "Loskh", "wozaiha", "subjadeites" };
     
     /// <summary>
     /// The main entry point for the application.
