@@ -29,7 +29,7 @@ public class BuildProcessor
     private readonly DirectoryInfo workFolder;
     private readonly DirectoryInfo staticFolder;
     private readonly DirectoryInfo artifactFolder;
-    
+
     private readonly DockerClient dockerClient;
 
     private static readonly string[] DalamudInternalDll = new[]
@@ -48,13 +48,26 @@ public class BuildProcessor
     private bool needExtendedImage;
 
     private const string DOCKER_IMAGE = "mcr.microsoft.com/dotnet/sdk";
-    private const string DOCKER_TAG = "6.0.300";
-    // This has to match the SDK's version identified by DOCKER_TAG
-    // See https://dotnet.microsoft.com/en-us/download/dotnet/6.0 for a mapping of SDK version <-> Runtime version
-    private const string RUNTIME_VERSION = "6.0.5";
+    private const string DOCKER_TAG = "7.0.100";
+    // This field specifies which dependency package is to be fetched depending on the .net target framework.
+    // The values to use in turn depend on the used SDK (see DOCKER_TAG) and what gets resolved at compile time.
+    // If a plugin breaks with a missing runtime package you might want to add the package here.
+    private readonly Dictionary<string, string[]> RUNTIME_PACKAGES = new()
+    {
+        {
+            "net6.0",
+            new[]
+            { "6.0.0", "6.0.11" }
+        },
+        {
+            "net7.0",
+            new[]
+            { "7.0.0", "7.0.1" }
+        }
+    };
 
     private const string EXTENDED_IMAGE_HASH = "f2c4a5661854d0dfde2b37c5fde3f222bc225678d5ec3e96ceaf17c6b7727ed8";
-    
+
     /// <summary>
     /// Set up build processor
     /// </summary>
@@ -93,7 +106,7 @@ public class BuildProcessor
             var cacheFolder = new DirectoryInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".plogon_cache"));
             if (!cacheFolder.Exists)
                 cacheFolder.Create();
-            
+
             var imageFile = new FileInfo(Path.Combine(cacheFolder.FullName, "extended-image.tar.bz2"));
             Stream? loadStream = null;
             if (imageFile.Exists)
@@ -107,12 +120,12 @@ public class BuildProcessor
                 using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
                 response.EnsureSuccessStatusCode();
                 await using var streamToReadFrom = await response.Content.ReadAsStreamAsync();
-                
+
                 await using Stream streamToWriteTo = File.Open(imageFile.FullName, FileMode.Create);
-                
+
                 await streamToReadFrom.CopyToAsync(streamToWriteTo);
                 streamToWriteTo.Close();
-                
+
                 loadStream = File.OpenRead(imageFile.FullName);
                 Log.Information("Downloaded extended image to cache: {Path}", imageFile.FullName);
             }
@@ -123,12 +136,12 @@ public class BuildProcessor
                     Log.Verbose("Docker image load ({Id}): {Status}", progress.ID, progress.Status);
                 }));
         }
-        
+
         await this.dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
-            {
-                FromImage = DOCKER_IMAGE,
-                Tag = DOCKER_TAG,
-            }, null,
+        {
+            FromImage = DOCKER_IMAGE,
+            Tag = DOCKER_TAG,
+        }, null,
             new Progress<JSONMessage>(progress =>
             {
                 Log.Verbose("Docker image pull ({Id}): {Status}", progress.ID, progress.Status);
@@ -185,6 +198,7 @@ public class BuildProcessor
             foreach (var manifest in channel.Value)
             {
                 var state = this.pluginRepository.GetPluginState(channel.Key, manifest.Key);
+                var isInAnyChannel = this.pluginRepository.IsPluginInAnyChannel(manifest.Key);
 
                 if (state == null || state.BuiltCommit != manifest.Value.Plugin.Commit)
                 {
@@ -196,6 +210,8 @@ public class BuildProcessor
                         HaveCommit = state?.BuiltCommit,
                         HaveTimeBuilt = state?.TimeBuilt,
                         HaveVersion = state?.EffectiveVersion,
+                        IsNewPlugin = state == null && !isInAnyChannel,
+                        IsNewInThisChannel = state == null && isInAnyChannel,
                         Type = BuildTask.TaskType.Build,
                     });
                 }
@@ -212,18 +228,18 @@ public class BuildProcessor
         var pkgName = name.ToLower();
         var fileName = $"{pkgName}.{dependency.Resolved}.nupkg";
         var depPath = Path.Combine(pkgFolder.FullName, fileName);
-        
+
         if (File.Exists(depPath))
             return;
-        
+
         Log.Information("   => Getting {DepName}(v{Version})", name, dependency.Resolved);
         var url =
             $"https://api.nuget.org/v3-flatcontainer/{pkgName}/{dependency.Resolved}/{fileName}";
 
         var data = await client.GetByteArrayAsync(url);
-            
+
         // TODO: verify content hash
-            
+
         await File.WriteAllBytesAsync(depPath, data);
     }
 
@@ -232,20 +248,20 @@ public class BuildProcessor
         foreach (var runtime in lockFileData.Runtimes)
         {
             Log.Information("Getting packages for runtime {Runtime}", runtime.Key);
-            
+
             await Task.WhenAll(runtime.Value
                 .Where(x => x.Value.Type != NugetLockfile.Dependency.DependencyType.Project)
-                .Select(dependency => GetDependency(dependency.Key, dependency.Value, pkgFolder,client)).ToList());
+                .Select(dependency => GetDependency(dependency.Key, dependency.Value, pkgFolder, client)).ToList());
         }
     }
 
     private async Task RestoreAllPackages(BuildTask task, DirectoryInfo localWorkFolder, DirectoryInfo pkgFolder)
     {
         var lockFiles = localWorkFolder.GetFiles("packages.lock.json", SearchOption.AllDirectories);
-        
+
         if (lockFiles.Length == 0)
             throw new Exception("No lockfiles present - please set \"RestorePackagesWithLockFile\" to true in your project file!");
-        
+
         using var client = new HttpClient();
 
         HashSet<Tuple<string, string>> runtimeDependencies = new();
@@ -259,10 +275,10 @@ public class BuildProcessor
                 throw new Exception($"Unknown lockfile version: {lockFileData.Version}");
 
             runtimeDependencies.UnionWith(GetRuntimeDependencies(lockFileData));
-            
+
             await RestorePackages(pkgFolder, lockFileData, client);
         }
-        
+
         // fetch runtime packages
         await Task.WhenAll(runtimeDependencies.Select(dependency => GetDependency(dependency.Item1, new() { Resolved = dependency.Item2 }, pkgFolder, client)));
     }
@@ -271,7 +287,7 @@ public class BuildProcessor
     {
         if (task.Manifest?.Build?.Needs == null || !task.Manifest.Build.Needs.Any())
             return;
-        
+
         using var client = new HttpClient();
 
         foreach (var need in task.Manifest!.Build!.Needs)
@@ -282,15 +298,15 @@ public class BuildProcessor
 
             if (need.Dest!.Contains(".."))
                 throw new Exception();
-            
+
             var fileToWriteTo = Path.Combine(needs.FullName, need.Dest!);
             {
                 await using Stream streamToWriteTo = File.Open(fileToWriteTo, FileMode.Create);
-            
+
                 await streamToReadFrom.CopyToAsync(streamToWriteTo);
                 streamToWriteTo.Close();
             }
-            
+
             Log.Information("Downloaded need {Url} to {Dest}", need.Url, need.Dest);
         }
     }
@@ -300,7 +316,7 @@ public class BuildProcessor
         [JsonPropertyName("key")]
         public string? Key { get; set; }
     };
-    
+
     private async Task<string> GetDiffUrl(DirectoryInfo workDir, BuildTask task, IEnumerable<BuildTask> tasks)
     {
         var internalName = task.InternalName;
@@ -308,11 +324,11 @@ public class BuildProcessor
         var wantCommit = task.Manifest!.Plugin.Commit;
         var host = new Uri(task.Manifest!.Plugin.Repository);
         const string emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-        
+
         if (string.IsNullOrEmpty(haveCommit))
         {
             haveCommit = emptyTree; // "empty tree"
-            
+
             var removeTask = tasks.FirstOrDefault(x =>
                 x.InternalName == internalName && x.Type == BuildTask.TaskType.Remove);
             if (removeTask != null)
@@ -334,7 +350,7 @@ public class BuildProcessor
                 // Check if relevant commit is still in the repo
                 if (!await CheckCommitExists(workDir, haveCommit))
                     haveCommit = emptyTree;
-                    
+
                 var diffPsi = new ProcessStartInfo("git",
                     $"diff --submodule=diff {haveCommit}..{wantCommit}")
                 {
@@ -351,7 +367,7 @@ public class BuildProcessor
                 await process.WaitForExitAsync();
                 if (process.ExitCode != 0)
                     throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
-        
+
                 Log.Verbose("{Args}: {Length}", diffPsi.Arguments, output.Length);
 
                 var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(output));
@@ -362,7 +378,7 @@ public class BuildProcessor
                 return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
         }
     }
-    
+
     private async Task<bool> CheckCommitExists(DirectoryInfo workDir, string commit)
     {
         var psi = new ProcessStartInfo("git",
@@ -398,7 +414,7 @@ public class BuildProcessor
 
         return string.IsNullOrEmpty(output);
     }
-    
+
     HashSet<Tuple<string, string>> GetRuntimeDependencies(NugetLockfile lockFileData)
     {
         HashSet<Tuple<string, string>> dependencies = new();
@@ -407,27 +423,29 @@ public class BuildProcessor
         {
             // check if framework identifier also specifies a runtime identifier
             var runtimeId = runtime.Key.Split('/').Skip(1).FirstOrDefault();
-            
-            var version = runtime.Key[..6] switch
-            {
-                "net5.0" => "5.0.0",
-                "net6.0" when runtimeId is null => "6.0.0",
-                "net6.0" => RUNTIME_VERSION, // if RUNTIME_VERSION doesn't match SDKs runtime version build will fail later on
-                _ => throw new ArgumentOutOfRangeException($"Unknown runtime requested: {runtime}")
-            };
 
-            if (runtimeId is null)
+            // add runtime packages to dependency list
+            if (!RUNTIME_PACKAGES.TryGetValue(runtime.Key[..6], out string[]? versions))
             {
-                // only generic reference packages are required
-                dependencies.Add(new("Microsoft.NETCore.App.Ref", version));
-                dependencies.Add(new ("Microsoft.AspNetCore.App.Ref", version));
+                throw new ArgumentOutOfRangeException($"Unknown runtime requested: {runtime}");
             }
-            else
+
+            foreach (var version in versions)
             {
-                // specific runtime packages are required
-                dependencies.Add(new($"Microsoft.NETCore.App.Runtime.{runtimeId}", version));
-                dependencies.Add(new ($"Microsoft.AspNetCore.App.Runtime.{runtimeId}", version));
-                dependencies.Add(new ($"Microsoft.NETCore.App.Host.{runtimeId}", version));
+                if (runtimeId is null)
+                {
+                    // only generic reference packages are required
+                    dependencies.Add(new("Microsoft.NETCore.App.Ref", version));
+                    dependencies.Add(new("Microsoft.AspNetCore.App.Ref", version));
+                    dependencies.Add(new("Microsoft.WindowsDesktop.App.Ref", version));
+                }
+                else
+                {
+                    // specific runtime packages are required
+                    dependencies.Add(new($"Microsoft.NETCore.App.Runtime.{runtimeId}", version));
+                    dependencies.Add(new($"Microsoft.AspNetCore.App.Runtime.{runtimeId}", version));
+                    dependencies.Add(new($"Microsoft.NETCore.App.Host.{runtimeId}", version));
+                }
             }
         }
 
@@ -453,12 +471,12 @@ public class BuildProcessor
             this.Version = version;
             this.Task = task;
         }
-        
+
         /// <summary>
         /// If it worked
         /// </summary>
         public bool Success { get; private set; }
-        
+
         /// <summary>
         /// Where the diff is
         /// </summary>
@@ -468,7 +486,7 @@ public class BuildProcessor
         /// The version of the plugin artifact
         /// </summary>
         public string? Version { get; private set; }
-        
+
         /// <summary>
         /// The task that was processed
         /// </summary>
@@ -479,8 +497,11 @@ public class BuildProcessor
     {
         [JsonProperty]
         public string? AssemblyVersion { get; set; }
+
+        [JsonProperty]
+        public string? InternalName { get; set; }
     }
-    
+
     /// <summary>
     /// Check out and build a plugin from a task
     /// </summary>
@@ -497,9 +518,9 @@ public class BuildProcessor
         {
             if (!commit)
                 throw new Exception("Can't remove plugins if not committing");
-            
+
             this.pluginRepository.RemovePlugin(task.Channel, task.InternalName);
-            
+
             var repoOutputDir = this.pluginRepository.GetPluginOutputDirectory(task.Channel, task.InternalName);
             repoOutputDir.Delete(true);
 
@@ -508,7 +529,7 @@ public class BuildProcessor
 
         if (task.Manifest == null)
             throw new Exception("Manifest was null");
-        
+
         var folderName = $"{task.InternalName}-{task.Manifest.Plugin.Commit}";
         var work = this.workFolder.CreateSubdirectory($"{folderName}-work");
         var output = this.workFolder.CreateSubdirectory($"{folderName}-output");
@@ -519,7 +540,7 @@ public class BuildProcessor
 
         if (string.IsNullOrWhiteSpace(task.Manifest.Plugin.Repository))
             throw new Exception("No repository specified");
-        
+
         if (!task.Manifest.Plugin.Repository.StartsWith("https://") ||
             !task.Manifest.Plugin.Repository.EndsWith(".git"))
             throw new Exception("Only HTTPS repository URLs ending in .git are supported");
@@ -528,7 +549,7 @@ public class BuildProcessor
             throw new Exception("No commit specified");
 
         task.Manifest.Plugin.ProjectPath ??= string.Empty;
-        
+
         if (task.Manifest.Plugin.ProjectPath.Contains(".."))
             throw new Exception("Not allowed");
 
@@ -554,7 +575,7 @@ public class BuildProcessor
                 Init = true,
             });
         }
-        
+
         if (!await CheckIfTrueCommit(work, task.Manifest.Plugin.Commit))
             throw new Exception("Commit in manifest is not a true commit, please don't specify tags");
 
@@ -565,12 +586,12 @@ public class BuildProcessor
         await GetNeeds(task, needs);
         await RestoreAllPackages(task, work, packages);
         var needsExtendedImage = task.Manifest?.Build?.Image == "extended";
-        
+
         var containerCreateResponse = await this.dockerClient.Containers.CreateContainerAsync(
             new CreateContainerParameters
             {
                 Image = needsExtendedImage ? EXTENDED_IMAGE_HASH : $"{DOCKER_IMAGE}:{DOCKER_TAG}",
-                
+
                 NetworkDisabled = true,
 
                 AttachStderr = true,
@@ -646,6 +667,11 @@ public class BuildProcessor
 
         Log.Information("Container for build exited, exit code: {Code}", exitCode);
 
+        if (exitCode == 0 && !commit && File.Exists(Path.Combine(task.Manifest.Directory.FullName, "images", "icon.png")) == false)
+        {
+            throw new MissingIconException();
+        }
+
         await this.dockerClient.Containers.RemoveContainerAsync(containerCreateResponse.ID,
             new ContainerRemoveParameters
             {
@@ -692,6 +718,9 @@ public class BuildProcessor
                 if (manifest == null)
                     throw new Exception("Generated manifest was null");
 
+                if (manifest.InternalName != task.InternalName)
+                    throw new Exception("Internal name in generated manifest JSON differs from DIP17 folder name.");
+
                 version = manifest.AssemblyVersion ?? throw new Exception("AssemblyVersion in generated manifest was null");
             }
             catch (Exception ex)
@@ -715,9 +744,9 @@ public class BuildProcessor
 
                     if (task.Manifest.Directory == null)
                         throw new Exception("Manifest had no directory set");
-                    
+
                     var imagesSourcePath = Path.Combine(task.Manifest.Directory.FullName, "images");
-                    if (Directory.Exists(imagesSourcePath)) 
+                    if (Directory.Exists(imagesSourcePath))
                     {
                         var imagesDestinationPath = Path.Combine(repoOutputDir.FullName, "images");
                         if (Directory.Exists(imagesDestinationPath))
@@ -728,11 +757,11 @@ public class BuildProcessor
                     // DELETE THIS!!
                     var manifestFile = new FileInfo(Path.Combine(repoOutputDir.FullName, $"{task.InternalName}.json"));
                     var manifestText = await File.ReadAllTextAsync(manifestFile.FullName);
-                    
+
                     var manifestObj = JObject.Parse(manifestText);
                     manifestObj["_isDip17Plugin"] = true;
                     manifestObj["_Dip17Channel"] = task.Channel;
-                    
+
                     await File.WriteAllTextAsync(manifestFile.FullName, manifestObj.ToString());
                 }
                 catch (Exception ex)
@@ -746,7 +775,7 @@ public class BuildProcessor
         {
             throw new Exception("DalamudPackager output not found, make sure it is installed");
         }
-        
+
         return new BuildResult(exitCode == 0, diffUrl, version, task);
     }
 
@@ -761,6 +790,21 @@ public class BuildProcessor
         /// <param name="inner">Actual error</param>
         public PluginCommitException(Exception inner)
             : base("Could not commit plugin.", inner)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Exception when icon is missing
+    /// </summary>
+    public class MissingIconException : Exception
+    {
+        /// <summary>
+        /// ctor
+        /// </summary>
+        /// <param name="inner">Actual error</param>
+        public MissingIconException()
+            : base("Missing icon.")
         {
         }
     }
