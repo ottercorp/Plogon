@@ -215,25 +215,45 @@ class Program
 
                         if (status.Success)
                         {
-                            Log.Information("Built: {Name} - {Sha} - {DiffUrl}", task.InternalName,
-                                task.Manifest.Plugin.Commit, status.DiffUrl);
+                            Log.Information("Built: {Name} - {Sha} - {DiffUrl} +{LinesAdded} -{LinesRemoved}", task.InternalName,
+                                task.Manifest.Plugin.Commit, status.DiffUrl ?? "null", status.DiffLinesAdded ?? -1, status.DiffLinesRemoved ?? -1);
+                            
+                            var diffLink =
+                                $"[Diff]({status.DiffUrl}) <sup><sub>({status.DiffLinesAdded} lines)</sub></sup>";
 
                             if (task.HaveVersion != null &&
                                 Version.Parse(status.Version!) <= Version.Parse(task.HaveVersion))
                             {
                                 buildsMd.AddRow("⚠️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
-                                    $"{(status.Version == task.HaveVersion ? "Same" : "Lower")} version!!! v{status.Version} - [Diff]({status.DiffUrl})");
+                                    $"{(status.Version == task.HaveVersion ? "Same" : "Lower")} version!!! v{status.Version} - {diffLink}");
                                 prLabels |= GitHubApi.PrLabel.VersionConflict;
                             }
                             else
                             {
                                 buildsMd.AddRow("✔️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
-                                    $"v{status.Version} - [Diff]({status.DiffUrl})");
+                                    $"v{status.Version} - {diffLink}");
                             }
 
                             if (!string.IsNullOrEmpty(prNumber) && !commit)
                                 await webservices.RegisterPrNumber(task.InternalName, task.Manifest.Plugin.Commit,
                                     prNumber);
+                            
+                            if (status.DiffLinesAdded.HasValue)
+                            {
+                                if (status.DiffLinesAdded > 400 && !prLabels.HasFlag(GitHubApi.PrLabel.SizeLarge))
+                                {
+                                    prLabels &= ~GitHubApi.PrLabel.SizeSmall;
+                                    prLabels |= GitHubApi.PrLabel.SizeMid;
+                                }
+                                else if (status.DiffLinesAdded > 1000)
+                                {
+                                    prLabels &= ~GitHubApi.PrLabel.SizeSmall;
+                                    prLabels &= ~GitHubApi.PrLabel.SizeMid;
+                                    prLabels |= GitHubApi.PrLabel.SizeLarge;
+                                }
+                                else if (!prLabels.HasFlag(GitHubApi.PrLabel.SizeMid) && !prLabels.HasFlag(GitHubApi.PrLabel.SizeLarge))
+                                    prLabels |= GitHubApi.PrLabel.SizeSmall;
+                            }
 
                             if (commit)
                             {
@@ -259,6 +279,9 @@ class Program
                                     Dip17Track = task.Channel,
                                     PrNumber = prInt,
                                     Changelog = changelog,
+                                    IsInitialRelease = task.IsNewPlugin,
+                                    DiffLinesAdded = status.DiffLinesAdded,
+                                    DiffLinesRemoved = status.DiffLinesRemoved,
                                 });
                             }
                         }

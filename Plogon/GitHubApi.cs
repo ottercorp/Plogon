@@ -19,6 +19,8 @@ public class GitHubApi
     /// <summary>
     /// Make new GitHub API
     /// </summary>
+    /// <param name="repoOwner">owner of the repo</param>
+    /// <param name="repoName">name of the repo</param>
     /// <param name="token">Github token</param>
     public GitHubApi(string repoOwner, string repoName, string token)
     {
@@ -33,7 +35,6 @@ public class GitHubApi
     /// <summary>
     /// Add comment to issue
     /// </summary>
-    /// <param name="repo">The repo to use</param>
     /// <param name="issueNumber">The issue number</param>
     /// <param name="body">The body</param>
     public async Task AddComment(int issueNumber, string body)
@@ -41,6 +42,10 @@ public class GitHubApi
         await this.ghClient.Issue.Comment.Create(repoOwner, repoName, issueNumber, body);
     }
 
+    /// <summary>
+    /// For all comments left by the current user on an issue/PR, put them into a "details" md fold.
+    /// </summary>
+    /// <param name="issueNumber">issue/pr number</param>
     public async Task CrossOutAllOfMyComments(int issueNumber)
     {
         var me = await this.ghClient.User.Current();
@@ -68,7 +73,6 @@ public class GitHubApi
     /// <summary>
     /// Retrieves a diff as string for a given pull request
     /// </summary>
-    /// <param name="repo">The repo to use</param>
     /// <param name="prNum">The pull request number</param>
     /// <returns></returns>
     public async Task<string> GetPullRequestDiff(string prNum)
@@ -80,7 +84,6 @@ public class GitHubApi
     /// <summary>
     /// Get the body of an issue.
     /// </summary>
-    /// <param name="repo">Repo name</param>
     /// <param name="issueNumber">Issue number</param>
     /// <returns>PR body</returns>
     /// <exception cref="Exception">Thrown when the body couldn't be read</exception>
@@ -98,18 +101,67 @@ public class GitHubApi
     private const string PR_LABEL_BUILD_FAILED = "build failed";
     private const string PR_LABEL_VERSION_CONFLICT = "version conflict";
     private const string PR_LABEL_MOVE_CHANNEL = "move channel";
+    private const string PR_LABEL_SIZE_SMALL = "size-small";
+    private const string PR_LABEL_SIZE_MID = "size-mid";
+    private const string PR_LABEL_SIZE_LARGE = "size-large";
 
+    /// <summary>
+    /// Labels for DIP17 PRs
+    /// </summary>
     [Flags]
     public enum PrLabel
     {
+        /// <summary>
+        /// No label
+        /// </summary>
         None = 0,
+        
+        /// <summary>
+        /// "new plugin"
+        /// </summary>
         NewPlugin = 1 << 0,
+        
+        /// <summary>
+        /// "need icon"
+        /// </summary>
         NeedIcon = 1 << 1,
+        
+        /// <summary>
+        /// "build failed"
+        /// </summary>
         BuildFailed = 1 << 2,
+        
+        /// <summary>
+        /// "version conflict"
+        /// </summary>
         VersionConflict = 1 << 3,
+        
+        /// <summary>
+        /// "move channel"
+        /// </summary>
         MoveChannel = 1 << 4,
+        
+        /// <summary>
+        /// "size-s"
+        /// </summary>
+        SizeSmall = 1 << 5,
+        
+        /// <summary>
+        /// "size-m"
+        /// </summary>
+        SizeMid = 1 << 6,
+        
+        /// <summary>
+        /// "size-l"
+        /// </summary>
+        SizeLarge = 1 << 7
     }
 
+    /// <summary>
+    /// Set the PR labels on a PR. Existing unmanaged labels are preserved.
+    /// </summary>
+    /// <param name="issueNumber">pr/issue number</param>
+    /// <param name="label">labels to set</param>
     public async Task SetPrLabels(int issueNumber, PrLabel label)
     {
         var managedLabels = new HashSet<string>();
@@ -147,6 +199,21 @@ public class GitHubApi
             managedLabels.Add(PR_LABEL_MOVE_CHANNEL);
         else
             managedLabels.Remove(PR_LABEL_MOVE_CHANNEL);
+        
+        if (label.HasFlag(PrLabel.SizeSmall))
+            managedLabels.Add(PR_LABEL_SIZE_SMALL);
+        else
+            managedLabels.Remove(PR_LABEL_SIZE_SMALL);
+        
+        if (label.HasFlag(PrLabel.SizeMid))
+            managedLabels.Add(PR_LABEL_SIZE_MID);
+        else
+            managedLabels.Remove(PR_LABEL_SIZE_MID);
+        
+        if (label.HasFlag(PrLabel.SizeLarge))
+            managedLabels.Add(PR_LABEL_SIZE_LARGE);
+        else
+            managedLabels.Remove(PR_LABEL_SIZE_LARGE);
 
         await this.ghClient.Issue.Labels.ReplaceAllForIssue(repoOwner, repoName, issueNumber, managedLabels.ToArray());
     }

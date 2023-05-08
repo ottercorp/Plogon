@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Docker.DotNet;
@@ -317,7 +318,28 @@ public class BuildProcessor
         public string? Key { get; set; }
     };
 
-    private async Task<string> GetDiffUrl(DirectoryInfo workDir, BuildTask task, IEnumerable<BuildTask> tasks)
+    /// <summary>
+    /// Info about a diff
+    /// </summary>
+    public class PluginDiff
+    {
+        /// <summary>
+        /// URL to reach the diff at
+        /// </summary>
+        public string DiffUrl = null!;
+        
+        /// <summary>
+        /// How many lines were added
+        /// </summary>
+        public int DiffLinesAdded;
+        
+        /// <summary>
+        /// How many lines were removed
+        /// </summary>
+        public int DiffLinesRemoved;
+    }
+    
+    private async Task<PluginDiff> GetPluginDiff(DirectoryInfo workDir, BuildTask task, IEnumerable<BuildTask> tasks)
     {
         var internalName = task.InternalName;
         var haveCommit = task.HaveCommit;
@@ -340,45 +362,91 @@ public class BuildProcessor
 
         using var client = new HttpClient();
 
+        var result = new PluginDiff();
+
         switch (host.Host)
         {
             case "github.com":
-                return $"{host.AbsoluteUri[..^4]}/compare/{haveCommit}..{wantCommit}";
+                result.DiffUrl =  $"{host.AbsoluteUri[..^4]}/compare/{haveCommit}..{wantCommit}";
+                break;
             case "gitlab.com":
-                return $"{host.AbsoluteUri[..^4]}/-/compare/{haveCommit}...{wantCommit}";
-            default:
-                // Check if relevant commit is still in the repo
-                if (!await CheckCommitExists(workDir, haveCommit))
-                    haveCommit = emptyTree;
-
-                var diffPsi = new ProcessStartInfo("git",
-                    $"diff --submodule=diff {haveCommit}..{wantCommit}")
-                {
-                    RedirectStandardOutput = true,
-                    WorkingDirectory = workDir.FullName,
-                };
-
-                var process = Process.Start(diffPsi);
-                if (process == null)
-                    throw new Exception("Diff process was null.");
-
-                var output = await process.StandardOutput.ReadToEndAsync();
-
-                await process.WaitForExitAsync();
-                if (process.ExitCode != 0)
-                    throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
-
-                Log.Verbose("{Args}: {Length}", diffPsi.Arguments, output.Length);
-
-                var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(output));
-                res.EnsureSuccessStatusCode();
-
-                var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
-
-                return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+                result.DiffUrl = $"{host.AbsoluteUri[..^4]}/-/compare/{haveCommit}...{wantCommit}";
+                break;
         }
-    }
+        
+        // Check if relevant commit is still in the repo
+        if (!await CheckCommitExists(workDir, haveCommit))
+            haveCommit = emptyTree;
+                    
+        var diffPsi = new ProcessStartInfo("git",
+            $"diff --submodule=diff {haveCommit}..{wantCommit}")
+        {
+            RedirectStandardOutput = true,
+            WorkingDirectory = workDir.FullName,
+        };
 
+        var process = Process.Start(diffPsi);
+        if (process == null)
+            throw new Exception("Diff process was null.");
+
+        var diffOutput = await process.StandardOutput.ReadToEndAsync();
+        Log.Verbose("{Args}: {Length}", diffPsi.Arguments, diffOutput.Length);
+
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+            throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
+        
+        diffPsi = new ProcessStartInfo("git",
+            $"diff --shortstat --submodule=diff {haveCommit}..{wantCommit}")
+        {
+            RedirectStandardOutput = true,
+            WorkingDirectory = workDir.FullName,
+        };
+
+        process = Process.Start(diffPsi);
+        if (process == null)
+            throw new Exception("Diff process was null.");
+
+        var shortstatOutput = await process.StandardOutput.ReadToEndAsync();
+
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+            throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
+
+        var regex = new Regex(@"^\s*(?:(?<numFilesChanged>[0-9]+) files? changed)?(?:, )?(?:(?<numInsertions>[0-9]+) insertions?\(\+\))?(?:, )?(?:(?<numDeletions>[0-9]+) deletions?\(-\))?\s*$");
+        var match = regex.Match(shortstatOutput);
+
+        result.DiffLinesAdded = 0;
+        result.DiffLinesRemoved = 0;
+
+        if (match.Success)
+        {
+            if (match.Groups.TryGetValue("numInsertions", out var groupInsertions) && int.TryParse(groupInsertions.Value, out var linesAdded))
+            {
+                result.DiffLinesAdded = linesAdded;
+            }
+        
+            if (match.Groups.TryGetValue("numDeletions", out var groupDeletions) && int.TryParse(groupDeletions.Value, out var linesRemoved))
+            {
+                result.DiffLinesRemoved = linesRemoved;
+            }
+        }
+
+        Log.Verbose("{Args}: {Output} - {Length}, +{LinesAdded} -{LinesRemoved}", diffPsi.Arguments, shortstatOutput, shortstatOutput.Length, result.DiffLinesAdded, result.DiffLinesRemoved);
+
+        if (!string.IsNullOrEmpty(result.DiffUrl)) 
+            return result;
+
+        var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
+        res.EnsureSuccessStatusCode();
+
+        var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
+
+        result.DiffUrl = $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+
+        return result;
+    }
+    
     private async Task<bool> CheckCommitExists(DirectoryInfo workDir, string commit)
     {
         var psi = new ProcessStartInfo("git",
@@ -392,6 +460,7 @@ public class BuildProcessor
             throw new Exception("Cat-file process was null.");
 
         await process.WaitForExitAsync();
+        Log.Verbose("CheckIfCommitExists: {Arguments}: {ExitCode}", psi.Arguments, process.ExitCode);
 
         return process.ExitCode == 0;
     }
@@ -461,13 +530,15 @@ public class BuildProcessor
         /// 
         /// </summary>
         /// <param name="success">If it worked</param>
-        /// <param name="diffUrl">diff url</param>
+        /// <param name="diff">diff url</param>
         /// <param name="version">plugin version</param>
         /// <param name="task">processed task</param>
-        public BuildResult(bool success, string? diffUrl, string? version, BuildTask task)
+        public BuildResult(bool success, PluginDiff? diff, string? version, BuildTask task)
         {
             this.Success = success;
-            this.DiffUrl = diffUrl;
+            this.DiffUrl = diff?.DiffUrl;
+            this.DiffLinesAdded = diff?.DiffLinesAdded;
+            this.DiffLinesRemoved = diff?.DiffLinesRemoved;
             this.Version = version;
             this.Task = task;
         }
@@ -491,6 +562,16 @@ public class BuildProcessor
         /// The task that was processed
         /// </summary>
         public BuildTask Task { get; private set; }
+        
+        /// <summary>
+        /// The amount of lines added, if available.
+        /// </summary>
+        public int? DiffLinesAdded { get; private set; }
+        
+        /// <summary>
+        /// The amount of lines removed, if available.
+        /// </summary>
+        public int? DiffLinesRemoved { get; private set; }
     }
 
     private class LegacyPluginManifest
@@ -502,6 +583,26 @@ public class BuildProcessor
         public string? InternalName { get; set; }
     }
 
+    static async Task RetryUntil(Func<Task> what, int maxTries = 10)
+    {
+        while (true)
+        {
+            try
+            {
+                await what();
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Task failed, tries left: {TriesLeft}", maxTries);
+
+                maxTries--;
+                if (maxTries <= 0)
+                    throw;
+            }
+        }
+    }
+    
     /// <summary>
     /// Check out and build a plugin from a task
     /// </summary>
@@ -579,12 +680,12 @@ public class BuildProcessor
         if (!await CheckIfTrueCommit(work, task.Manifest.Plugin.Commit))
             throw new Exception("Commit in manifest is not a true commit, please don't specify tags");
 
-        var diffUrl = await GetDiffUrl(work, task, otherTasks);
+        var diff = await GetPluginDiff(work, task, otherTasks);
 
         var dalamudAssemblyDir = await this.dalamudReleases.GetDalamudAssemblyDirAsync(task.Channel);
-
-        await GetNeeds(task, needs);
-        await RestoreAllPackages(task, work, packages);
+        
+        await RetryUntil(async () => await GetNeeds(task, needs));
+        await RetryUntil(async () => await RestoreAllPackages(task, work, packages));
         var needsExtendedImage = task.Manifest?.Build?.Image == "extended";
 
         var containerCreateResponse = await this.dockerClient.Containers.CreateContainerAsync(
@@ -775,8 +876,8 @@ public class BuildProcessor
         {
             throw new Exception("DalamudPackager output not found, make sure it is installed");
         }
-
-        return new BuildResult(exitCode == 0, diffUrl, version, task);
+        
+        return new BuildResult(exitCode == 0, diff, version, task);
     }
 
     /// <summary>
@@ -802,7 +903,6 @@ public class BuildProcessor
         /// <summary>
         /// ctor
         /// </summary>
-        /// <param name="inner">Actual error</param>
         public MissingIconException()
             : base("Missing icon.")
         {
