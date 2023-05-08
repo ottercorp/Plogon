@@ -5,14 +5,15 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Discord;
+using Plogon.Repo;
 using Serilog;
 
 namespace Plogon;
 
 class Program
 {
-    private static readonly string[] AlwaysBuildUsers = new[] { "goaaats", "Bluefissure", "MapleRecall", "Loskh", "wozaiha", "subjadeites" };
-    
+    private static readonly string[] AlwaysBuildUsers = new[] { "Bluefissure", "MapleRecall", "Loskh", "wozaiha", "subjadeites" };
+
     /// <summary>
     /// The main entry point for the application.
     /// </summary>
@@ -31,12 +32,14 @@ class Program
 
         var webhook = new DiscordWebhook();
         // var webservices = new WebServices();
-        
+
         var githubSummary = "## Build Summary\n";
         GitHubOutputBuilder.SetActive(ci);
-        
+
         var actor = Environment.GetEnvironmentVariable("PR_ACTOR");
-        var repoName = Environment.GetEnvironmentVariable("GITHUB_REPOSITORY");
+        var repoParts = Environment.GetEnvironmentVariable("GITHUB_REPOSITORY")?.Split("/");
+        var repoOwner = repoParts?[0];
+        var repoName = repoParts?[1];
         var prNumber = Environment.GetEnvironmentVariable("GITHUB_PR_NUM");
 
         GitHubApi? gitHubApi = null;
@@ -45,14 +48,21 @@ class Program
             var token = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
             if (string.IsNullOrEmpty(token))
                 throw new Exception("GITHUB_TOKEN not set");
-            
-            gitHubApi = new GitHubApi(token);
+
+            if (string.IsNullOrEmpty(repoOwner))
+                throw new Exception("repoOwner null or empty");
+
+            if (string.IsNullOrEmpty(repoName))
+                throw new Exception("repoName null or empty");
+
+            gitHubApi = new GitHubApi(repoOwner, repoName, token);
             Log.Verbose("GitHub API OK, running for {Actor}", actor);
         }
 
         var aborted = false;
-        var anyFailed = false;
-        var anyTried = false;
+        var numFailed = 0;
+        var numTried = 0;
+        var numNoIcon = 0;
 
         var statuses = new List<BuildProcessor.BuildResult>();
 
@@ -61,7 +71,7 @@ class Program
             string? prDiff = null;
             if (gitHubApi is not null && repoName is not null && prNumber is not null)
             {
-                prDiff = await gitHubApi.GetPullRequestDiff(repoName, prNumber);
+                prDiff = await gitHubApi.GetPullRequestDiff(prNumber);
             }
             else
             {
@@ -105,6 +115,9 @@ class Program
 
                 var buildsMd = MarkdownTableBuilder.Create(" ", "Name", "Commit", "Status");
 
+                // label flags
+                var prLabels = GitHubApi.PrLabel.None;
+
                 foreach (var task in tasks)
                 {
                     string? fancyCommit = null;
@@ -135,6 +148,11 @@ class Program
                         buildsMd.AddRow("❔", $"{task.InternalName} [{task.Channel}]", fancyCommit, "Not ran");
                         continue;
                     }
+
+                    if (task.IsNewPlugin)
+                        prLabels |= GitHubApi.PrLabel.NewPlugin;
+                    else if (task.IsNewInThisChannel)
+                        prLabels |= GitHubApi.PrLabel.MoveChannel;
 
                     try
                     {
@@ -183,13 +201,13 @@ class Program
                             task.Manifest.Plugin.Commit,
                             task.HaveCommit ?? "nothing");
 
-                        anyTried = true;
+                        numTried++;
 
                         var changelog = task.Manifest.Plugin.Changelog;
                         if (string.IsNullOrEmpty(changelog) && repoName != null && prNumber != null &&
                             gitHubApi != null && commit)
                         {
-                            changelog = await gitHubApi.GetIssueBody(repoName, int.Parse(prNumber));
+                            changelog = await gitHubApi.GetIssueBody(int.Parse(prNumber));
                         }
 
                         var status = await buildProcessor.ProcessTask(task, commit, changelog, tasks);
@@ -205,14 +223,43 @@ class Program
                             {
                                 buildsMd.AddRow("⚠️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
                                     $"{(status.Version == task.HaveVersion ? "Same" : "Lower")} version!!! v{status.Version} - [Diff]({status.DiffUrl})");
+                                prLabels |= GitHubApi.PrLabel.VersionConflict;
                             }
                             else
                             {
                                 buildsMd.AddRow("✔️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
                                     $"v{status.Version} - [Diff]({status.DiffUrl})");
+                            }
 
-                                // if (!string.IsNullOrEmpty(prNumber) && !commit)
-                                //     await webservices.RegisterPrNumber(task.InternalName, status.Version!, prNumber);
+                            if (!string.IsNullOrEmpty(prNumber) && !commit)
+                                await webservices.RegisterPrNumber(task.InternalName, task.Manifest.Plugin.Commit,
+                                    prNumber);
+
+                            if (commit)
+                            {
+                                int? prInt = null;
+                                if (int.TryParse(
+                                        await webservices.GetPrNumber(task.InternalName, task.Manifest.Plugin.Commit),
+                                        out var commitPrNum))
+                                {
+                                    // Let's try again here in case we didn't get it the first time around
+                                    if (string.IsNullOrEmpty(changelog) && repoName != null &&
+                                        gitHubApi != null)
+                                    {
+                                        changelog = await gitHubApi.GetIssueBody(commitPrNum);
+                                    }
+
+                                    prInt = commitPrNum;
+                                }
+
+                                await webservices.StagePluginBuild(new WebServices.StagedPluginInfo
+                                {
+                                    InternalName = task.InternalName,
+                                    Version = status.Version!,
+                                    Dip17Track = task.Channel,
+                                    PrNumber = prInt,
+                                    Changelog = changelog,
+                                });
                             }
                         }
                         else
@@ -222,7 +269,7 @@ class Program
 
                             buildsMd.AddRow("❌", $"{task.InternalName} [{task.Channel}]", fancyCommit,
                                 $"Build failed ([Diff]({status.DiffUrl}))");
-                            anyFailed = true;
+                            numFailed++;
                         }
                     }
                     catch (BuildProcessor.PluginCommitException ex)
@@ -234,14 +281,24 @@ class Program
                         buildsMd.AddRow("⁉️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
                             "Could not commit to repo");
                         aborted = true;
-                        anyFailed = true;
+                        numFailed++;
+                    }
+                    catch (BuildProcessor.MissingIconException)
+                    {
+                        Log.Error("Missing icon!");
+                        buildsMd.AddRow("🖼️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
+                            "Missing icon in images/ build output!");
+                        numFailed++;
+                        numNoIcon++;
+
+                        prLabels |= GitHubApi.PrLabel.NeedIcon;
                     }
                     catch (Exception ex)
                     {
                         Log.Error(ex, "Could not build");
                         buildsMd.AddRow("😰", $"{task.InternalName} [{task.Channel}]", fancyCommit,
                             $"Build system error: {ex.Message}");
-                        anyFailed = true;
+                        numFailed++;
                     }
 
                     GitHubOutputBuilder.EndGroup();
@@ -258,8 +315,15 @@ class Program
                 {
                     text = text.Replace("✔️", "<:yeah:980227103725342810>");
                     text = text.Replace("❌", "<:whaaa:980227735421079622>");
+                    text = text.Replace("😰", "<:dogeatbee:539585692439674881>");
                     return text;
                 }
+
+                if (aborted || (numFailed > 0 && numFailed != numNoIcon))
+                    prLabels |= GitHubApi.PrLabel.BuildFailed;
+
+                var anyTried = numTried > 0;
+                var anyFailed = numFailed > 0;
 
                 if (repoName != null && prNumber != null)
                 {
@@ -275,7 +339,14 @@ class Program
                         commentText =
                             "⚠️ No builds attempted! This probably means that your owners property is misconfigured.";
 
-                    var commentTask = gitHubApi?.AddComment(repoName, int.Parse(prNumber),
+                    var prNum = int.Parse(prNumber);
+
+                    var crossOutTask = gitHubApi?.CrossOutAllOfMyComments(prNum);
+
+                    if (crossOutTask != null)
+                        await crossOutTask;
+
+                    var commentTask = gitHubApi?.AddComment(prNum,
                         commentText + "\n\n" + buildsMd + "\n##### " + links);
 
                     if (commentTask != null)
@@ -288,7 +359,7 @@ class Program
                     {
                         hookTitle += " created";
 
-                        var prDesc = await gitHubApi!.GetIssueBody(repoName, int.Parse(prNumber));
+                        var prDesc = await gitHubApi!.GetIssueBody(prNum);
                         if (!string.IsNullOrEmpty(prDesc))
                             buildInfo += $"```\n{prDesc}\n```\n";
                     }
@@ -311,7 +382,10 @@ class Program
                     var id = await webhook.Send(ok ? Color.Purple : Color.Red,
                         $"{buildInfo}\n\n{links} - [PR](https://github.com/ottercorp/DalamudPluginsD17/pull/{prNumber})",
                         hookTitle, ok ? "Accepted" : "Rejected");
-                    // await webservices.RegisterMessageId(prNumber!, id);
+                    await webservices.RegisterMessageId(prNumber!, id);
+
+                    if (gitHubApi != null)
+                        await gitHubApi.SetPrLabels(prNum, prLabels);
                 }
 
                 if (repoName != null && commit && anyTried)
@@ -320,64 +394,64 @@ class Program
                         $"{ReplaceDiscordEmotes(buildsMd.GetText(true))}\n\n[Show log](https://github.com/ottercorp/DalamudPluginsD17/actions/runs/{actionRunId})",
                         "Builds committed", string.Empty);
 
+
                     // TODO: We don't support this for removals for now
-                    // foreach (var buildResult in statuses.Where(x => x.Task.Type == BuildTask.TaskType.Build))
-                    // {
-                    //     if (!buildResult.Success && !aborted)
-                    //         continue;
+                    foreach (var buildResult in statuses.Where(x => x.Task.Type == BuildTask.TaskType.Build))
+                    {
+                        if (!buildResult.Success && !aborted)
+                            continue;
 
-                    //     var resultPrNum =
-                    //         await webservices.GetPrNumber(buildResult.Task.InternalName, buildResult.Version!);
-                    //     if (resultPrNum == null)
-                    //     {
-                    //         Log.Warning("No PR for {InternalName} - {Version}", buildResult.Task.InternalName,
-                    //             buildResult.Version);
-                    //         continue;
-                    //     }
+                        var resultPrNum =
+                            await webservices.GetPrNumber(buildResult.Task.InternalName, buildResult.Version!);
+                        if (resultPrNum == null)
+                        {
+                            Log.Warning("No PR for {InternalName} - {Version}", buildResult.Task.InternalName,
+                                buildResult.Version);
+                            continue;
+                        }
+                        try
+                        {
+                            var msgIds = await webservices.GetMessageIds(resultPrNum);
 
-                    //     try
-                    //     {
-                    //         var msgIds = await webservices.GetMessageIds(resultPrNum);
+                            foreach (var id in msgIds)
+                            {
+                                await webhook.Client.ModifyMessageAsync(ulong.Parse(id), properties =>
+                                {
+                                    var embed = properties.Embeds.Value.First();
+                                    var newEmbed = new EmbedBuilder()
+                                        .WithColor(Color.LightGrey)
+                                        .WithTitle(embed.Title)
+                                        .WithCurrentTimestamp()
+                                        .WithDescription(embed.Description);
 
-                    //         foreach (var id in msgIds)
-                    //         {
-                    //             await webhook.Client.ModifyMessageAsync(ulong.Parse(id), properties =>
-                    //             {
-                    //                 var embed = properties.Embeds.Value.First();
-                    //                 var newEmbed = new EmbedBuilder()
-                    //                     .WithColor(Color.LightGrey)
-                    //                     .WithTitle(embed.Title)
-                    //                     .WithCurrentTimestamp()
-                    //                     .WithDescription(embed.Description);
+                                    if (embed.Author.HasValue)
+                                        newEmbed = newEmbed.WithAuthor(embed.Author.Value.Name,
+                                            embed.Author.Value.IconUrl,
+                                            embed.Author.Value.Url);
 
-                    //                 if (embed.Author.HasValue)
-                    //                     newEmbed = newEmbed.WithAuthor(embed.Author.Value.Name,
-                    //                         embed.Author.Value.IconUrl,
-                    //                         embed.Author.Value.Url);
+                                    if (embed.Footer.HasValue)
+                                    {
+                                        if (embed.Footer.Value.Text.Contains("Comment"))
+                                        {
+                                            newEmbed = newEmbed.WithFooter(
+                                                embed.Footer.Value.Text.Replace("Comment", "Committed"),
+                                                embed.Footer.Value.IconUrl);
+                                        }
+                                        else
+                                        {
+                                            newEmbed = newEmbed.WithFooter("Committed");
+                                        }
+                                    }
 
-                    //                 if (embed.Footer.HasValue)
-                    //                 {
-                    //                     if (embed.Footer.Value.Text.Contains("Comment"))
-                    //                     {
-                    //                         newEmbed = newEmbed.WithFooter(
-                    //                             embed.Footer.Value.Text.Replace("Comment", "Committed"),
-                    //                             embed.Footer.Value.IconUrl);
-                    //                     }
-                    //                     else
-                    //                     {
-                    //                         newEmbed = newEmbed.WithFooter("Committed");
-                    //                     }
-                    //                 }
-
-                    //                 properties.Embeds = new[] { newEmbed.Build() };
-                    //             });
-                    //         }
-                    //     }
-                    //     catch (Exception ex)
-                    //     {
-                    //         Log.Error(ex, "Could not update messages");
-                    //     }
-                    // }
+                                    properties.Embeds = new[] { newEmbed.Build() };
+                                });
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex, "Could not update messages");
+                        }
+                    }
                 }
             }
         }
@@ -393,7 +467,9 @@ class Program
                 await File.WriteAllTextAsync(githubSummaryFilePath, githubSummary);
             }
 
-            if (!anyTried && prNumber != null)
+            var anyFailed = numFailed > 0;
+
+            if (numTried == 0 && prNumber != null)
             {
                 Log.Error("Was a PR, but did not build any plugins - failing.");
                 anyFailed = true;

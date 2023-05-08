@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Threading.Tasks;
 using Serilog;
+#pragma warning disable CS1591
 
 namespace Plogon;
 
@@ -89,5 +90,26 @@ public class WebServices
         result.EnsureSuccessStatusCode();
 
         return text;
+    }
+    
+    public class StagedPluginInfo
+    {
+        public string InternalName { get; set; } = null!;
+        public string Version { get; set; } = null!;
+        public string Dip17Track { get; set; } = null!;
+        public int? PrNumber { get; set; }
+        public string? Changelog { get; set; }
+    }
+    
+    public async Task StagePluginBuild(StagedPluginInfo info)
+    {
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Add("X-XL-Key", this.key);
+        var result = await client.PostAsync(
+            $"https://kamori.goats.dev/Plogon/StagePluginBuild",
+            JsonContent.Create(info));
+        
+        Log.Information(await result.Content.ReadAsStringAsync());
+        result.EnsureSuccessStatusCode();
     }
 }
