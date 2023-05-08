@@ -31,7 +31,7 @@ class Program
         SetupLogging();
 
         var webhook = new DiscordWebhook();
-        // var webservices = new WebServices();
+        var webservices = new WebServices();
 
         var githubSummary = "## Build Summary\n";
         GitHubOutputBuilder.SetActive(ci);
@@ -350,9 +350,8 @@ class Program
 
                 if (repoName != null && prNumber != null)
                 {
-                    // var existingMessages = await webservices.GetMessageIds(prNumber);
-                    // var alreadyPosted = existingMessages.Length > 0;
-                    var alreadyPosted = false;
+                    var existingMessages = await webservices.GetMessageIds(prNumber);
+                    var alreadyPosted = existingMessages.Length > 0;
 
                     var links =
                         $"[Show log](https://github.com/ottercorp/DalamudPluginsD17/actions/runs/{actionRunId}) - [Review](https://github.com/ottercorp/DalamudPluginsD17/pull/{prNumber}/files#submit-review)";
