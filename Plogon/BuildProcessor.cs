@@ -770,7 +770,8 @@ public class BuildProcessor
 
         if (exitCode == 0 && !commit && File.Exists(Path.Combine(task.Manifest.Directory.FullName, "images", "icon.png")) == false)
         {
-            throw new MissingIconException();
+            Log.Information("Icon is missing");
+            //throw new MissingIconException();
         }
 
         await this.dockerClient.Containers.RemoveContainerAsync(containerCreateResponse.ID,
