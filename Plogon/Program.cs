@@ -272,17 +272,17 @@ class Program
                                     prInt = commitPrNum;
                                 }
 
-                                await webservices.StagePluginBuild(new WebServices.StagedPluginInfo
-                                {
-                                    InternalName = task.InternalName,
-                                    Version = status.Version!,
-                                    Dip17Track = task.Channel,
-                                    PrNumber = prInt,
-                                    Changelog = changelog,
-                                    IsInitialRelease = task.IsNewPlugin,
-                                    DiffLinesAdded = status.DiffLinesAdded,
-                                    DiffLinesRemoved = status.DiffLinesRemoved,
-                                });
+                                // await webservices.StagePluginBuild(new WebServices.StagedPluginInfo
+                                // {
+                                //     InternalName = task.InternalName,
+                                //     Version = status.Version!,
+                                //     Dip17Track = task.Channel,
+                                //     PrNumber = prInt,
+                                //     Changelog = changelog,
+                                //     IsInitialRelease = task.IsNewPlugin,
+                                //     DiffLinesAdded = status.DiffLinesAdded,
+                                //     DiffLinesRemoved = status.DiffLinesRemoved,
+                                // });
                             }
                         }
                         else
