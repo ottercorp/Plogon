@@ -72,6 +72,67 @@ public class BuildProcessor
     };
 
     private const string EXTENDED_IMAGE_HASH = "fba5ce59717fba4371149b8ae39d222a29a7f402c10e0941c85a27e8d1bb6ce4";
+
+    /// <summary>
+    /// Parameters for build processor.
+    /// </summary>
+    public struct BuildProcessorSetup
+    {
+        /// <summary>
+        /// Directory containing build output.
+        /// </summary>
+        public DirectoryInfo RepoFolder { get; set; }
+        
+        /// <summary>
+        /// Directory containing manifests.
+        /// </summary>
+        public DirectoryInfo ManifestFolder { get; set; }
+        
+        /// <summary>
+        /// Directory builds will be made in.
+        /// </summary>
+        public DirectoryInfo WorkFolder { get; set; }
+        
+        /// <summary>
+        /// Directory containing static files.
+        /// </summary>
+        public DirectoryInfo StaticFolder { get; set; }
+        
+        /// <summary>
+        /// Directory artifacts will be stored in.
+        /// </summary>
+        public DirectoryInfo ArtifactFolder { get; set; }
+        
+        /// <summary>
+        /// Path to file containing overrides for the Dalamud version used.
+        /// </summary>
+        public FileInfo BuildOverridesFile { get; set; }
+        
+        /// <summary>
+        /// Whether or not non-default build images are allowed.
+        /// </summary>
+        public bool AllowNonDefaultImages { get; set; }
+        
+        /// <summary>
+        /// When set, plugins whose manifest was modified before this date will not be built.
+        /// </summary>
+        public DateTime? CutoffDate{ get; set; }
+        
+        /// <summary>
+        /// Bytes of the secrets private key.
+        /// </summary>
+        public byte[] SecretsPrivateKeyBytes{ get; set; }
+        
+        /// <summary>
+        /// Password for the aforementioned private key.
+        /// </summary>
+        public string SecretsPrivateKeyPassword { get; set; }
+        
+        /// <summary>
+        /// Diff in unified format that contains the changes requested by the PR we are running as
+        /// </summary>
+        public string? PrDiff { get; set; }
+    }
     
     /// <summary>
     /// Set up build processor
