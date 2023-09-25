@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using Discord;
-using Plogon.Repo;
 using Serilog;
 
 namespace Plogon;
@@ -13,6 +13,29 @@ namespace Plogon;
 class Program
 {
     private static readonly string[] AlwaysBuildUsers = new[] { "Bluefissure", "MapleRecall", "Loskh", "wozaiha", "subjadeites" };
+
+    private enum ModeOfOperation
+    {
+        /// <summary>
+        /// No mode set.
+        /// </summary>
+        Unknown,
+        
+        /// <summary>
+        /// We are building a plugin for someone in a Pull Request.
+        /// </summary>
+        PullRequest,
+        
+        /// <summary>
+        /// We are building pending plugins to submit them to the repo.
+        /// </summary>
+        Commit,
+        
+        /// <summary>
+        /// We are running a continuous verification build for Dalamud.
+        /// </summary>
+        Continuous,
+    }
 
     /// <summary>
     /// The main entry point for the application.
@@ -22,13 +45,17 @@ class Program
     /// <param name="workFolder">The folder to store temporary files and build output in.</param>
     /// <param name="staticFolder">The 'static' folder that holds script files.</param>
     /// <param name="artifactFolder">The folder to store artifacts in.</param>
+    /// <param name="mode">Mode to run Plogon in.</param>
+    /// <param name="buildOverridesFile">Path to file containing build overrides.</param>
     /// <param name="ci">Running in CI.</param>
-    /// <param name="commit">Commit to repo.</param>
     /// <param name="buildAll">Ignore actor checks.</param>
     static async Task Main(DirectoryInfo outputFolder, DirectoryInfo manifestFolder, DirectoryInfo workFolder,
-        DirectoryInfo staticFolder, DirectoryInfo artifactFolder, bool ci = false, bool commit = false, bool buildAll = false)
+        DirectoryInfo staticFolder, DirectoryInfo artifactFolder, ModeOfOperation mode, FileInfo? buildOverridesFile = null, bool ci = false, bool buildAll = false)
     {
         SetupLogging();
+
+        if (mode == ModeOfOperation.Unknown)
+            throw new Exception("No mode of operation specified.");
 
         var webhook = new DiscordWebhook();
         var webservices = new WebServices();
@@ -41,6 +68,9 @@ class Program
         var repoOwner = repoParts?[0];
         var repoName = repoParts?[1];
         var prNumber = Environment.GetEnvironmentVariable("GITHUB_PR_NUM");
+        
+        if (mode == ModeOfOperation.PullRequest && string.IsNullOrEmpty(prNumber))
+            throw new Exception("PR number not set");
 
         GitHubApi? gitHubApi = null;
         if (ci)
@@ -59,12 +89,25 @@ class Program
             Log.Verbose("GitHub API OK, running for {Actor}", actor);
         }
 
+        var secretsPk = Environment.GetEnvironmentVariable("PLOGON_SECRETS_PK");
+        if (string.IsNullOrEmpty(secretsPk))
+            throw new Exception("No secrets private key");
+        var secretsPkBytes = System.Text.Encoding.ASCII.GetBytes(secretsPk);
+
+        var secretsPkPassword = Environment.GetEnvironmentVariable("PLOGON_SECRETS_PK_PASSWORD");
+        if (string.IsNullOrEmpty(secretsPkPassword))
+            throw new Exception("No secrets private key password");
+
         var aborted = false;
         var numFailed = 0;
         var numTried = 0;
         var numNoIcon = 0;
 
         var statuses = new List<BuildProcessor.BuildResult>();
+
+        WebServices.Stats? stats = null;
+        if (mode == ModeOfOperation.PullRequest)
+            stats = await webservices.GetStats();
 
         try
         {
@@ -73,14 +116,38 @@ class Program
             {
                 prDiff = await gitHubApi.GetPullRequestDiff(prNumber);
             }
-            else
+            else if (mode == ModeOfOperation.PullRequest)
             {
-                Log.Information("Diff for PR is not available, this might lead to unnecessary builds being performed.");
+                Log.Error("Diff for PR is not available, this might lead to unnecessary builds being performed.");
             }
 
-            var buildProcessor = new BuildProcessor(outputFolder, manifestFolder, workFolder, staticFolder,
-                artifactFolder, prDiff);
-            var tasks = buildProcessor.GetBuildTasks();
+            buildOverridesFile ??= new FileInfo(Path.Combine(manifestFolder.FullName, "overrides.toml"));
+            var setup = new BuildProcessor.BuildProcessorSetup
+            {
+                RepoFolder = outputFolder,
+                ManifestFolder = manifestFolder,
+                WorkFolder = workFolder,
+                StaticFolder = staticFolder,
+                ArtifactFolder = artifactFolder,
+                BuildOverridesFile = buildOverridesFile,
+                SecretsPrivateKeyBytes = secretsPkBytes,
+                SecretsPrivateKeyPassword = secretsPkPassword,
+                PrDiff = prDiff,
+                AllowNonDefaultImages = mode != ModeOfOperation.Continuous, // HACK, fix it
+                CutoffDate = null,
+            };
+
+            // HACK, we don't know the API level a plugin is for before building it...
+            // Feels like a design flaw, but we can't do much about it until we change how
+            // packager works
+            if (mode == ModeOfOperation.Continuous)
+            {
+                // API8 release
+                setup.CutoffDate = new DateTime(2023, 06, 10);
+            }
+            
+            var buildProcessor = new BuildProcessor(setup);
+            var tasks = buildProcessor.GetBuildTasks(mode == ModeOfOperation.Continuous);
 
             GitHubOutputBuilder.StartGroup("List all tasks");
 
@@ -121,7 +188,8 @@ class Program
                 foreach (var task in tasks)
                 {
                     string? fancyCommit = null;
-                    if (task.Manifest?.Plugin?.Commit != null)
+                    var url = task.Manifest?.Plugin.Repository.Replace(".git", string.Empty);
+                    if (task.Manifest?.Plugin.Commit != null && url != null)
                     {
                         fancyCommit = task.Manifest.Plugin.Commit.Length > 7
                             ? task.Manifest.Plugin.Commit[..7]
@@ -129,12 +197,10 @@ class Program
 
                         if (task.IsGitHub)
                         {
-                            var url = task.Manifest!.Plugin!.Repository.Replace(".git", string.Empty);
                             fancyCommit = $"[{fancyCommit}]({url}/commit/{task.Manifest.Plugin.Commit})";
                         }
                         else if (task.IsGitLab)
                         {
-                            var url = task.Manifest!.Plugin!.Repository.Replace(".git", string.Empty);
                             fancyCommit = $"[{fancyCommit}]({url}/-/commit/{task.Manifest.Plugin.Commit})";
                         }
                     }
@@ -158,13 +224,14 @@ class Program
                     {
                         if (task.Type == BuildTask.TaskType.Remove)
                         {
-                            if (!commit)
+                            // If we are not committing, removal tasks don't do anything and we should not consider them
+                            if (mode != ModeOfOperation.Commit)
                                 continue;
 
                             GitHubOutputBuilder.StartGroup($"Remove {task.InternalName}");
                             Log.Information("Remove: {Name} - {Channel}", task.InternalName, task.Channel);
 
-                            var removeStatus = await buildProcessor.ProcessTask(task, commit, null, tasks);
+                            var removeStatus = await buildProcessor.ProcessTask(task, true, null, tasks);
                             statuses.Add(removeStatus);
 
                             if (removeStatus.Success)
@@ -180,7 +247,7 @@ class Program
                             continue;
                         }
 
-                        GitHubOutputBuilder.StartGroup($"Build {task.InternalName} ({task.Manifest!.Plugin!.Commit})");
+                        GitHubOutputBuilder.StartGroup($"Build {task.InternalName}[{task.Channel}] ({task.Manifest!.Plugin!.Commit})");
 
                         if (!buildAll && (task.Manifest.Plugin.Owners.All(x => x != actor) &&
                                           AlwaysBuildUsers.All(x => x != actor)))
@@ -197,7 +264,8 @@ class Program
                             continue;
                         }
 
-                        Log.Information("Need: {Name} - {Sha} (have {HaveCommit})", task.InternalName,
+                        Log.Information("Need: {Name}[{Channel}] - {Sha} (have {HaveCommit})", task.InternalName,
+                            task.Channel,
                             task.Manifest.Plugin.Commit,
                             task.HaveCommit ?? "nothing");
 
@@ -205,57 +273,64 @@ class Program
 
                         var changelog = task.Manifest.Plugin.Changelog;
                         if (string.IsNullOrEmpty(changelog) && repoName != null && prNumber != null &&
-                            gitHubApi != null && commit)
+                            gitHubApi != null && mode == ModeOfOperation.Commit)
                         {
                             changelog = await gitHubApi.GetIssueBody(int.Parse(prNumber));
                         }
 
-                        var status = await buildProcessor.ProcessTask(task, commit, changelog, tasks);
+                        var status = await buildProcessor.ProcessTask(task, mode == ModeOfOperation.Commit, changelog, tasks);
                         statuses.Add(status);
 
                         if (status.Success)
                         {
                             Log.Information("Built: {Name} - {Sha} - {DiffUrl} +{LinesAdded} -{LinesRemoved}", task.InternalName,
                                 task.Manifest.Plugin.Commit, status.DiffUrl ?? "null", status.DiffLinesAdded ?? -1, status.DiffLinesRemoved ?? -1);
-                            
-                            var diffLink =
-                                $"[Diff]({status.DiffUrl}) <sup><sub>({status.DiffLinesAdded} lines)</sub></sup>";
 
-                            if (task.HaveVersion != null &&
-                                Version.Parse(status.Version!) <= Version.Parse(task.HaveVersion))
+                            var prevVersionText = string.IsNullOrEmpty(status.PreviousVersion)
+                                ? string.Empty
+                                : $", prev. {status.PreviousVersion}";
+                            var diffLink = status.DiffUrl == url ? $"[Repo]({url}) <sup><sup>(New plugin)</sup></sup>" :
+                                $"[Diff]({status.DiffUrl}) <sup><sub>({status.DiffLinesAdded} lines{prevVersionText})</sub></sup>";
+
+                            // We don't want to indicate success for continuous builds
+                            if (mode != ModeOfOperation.Continuous)
                             {
-                                buildsMd.AddRow("⚠️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
-                                    $"{(status.Version == task.HaveVersion ? "Same" : "Lower")} version!!! v{status.Version} - {diffLink}");
-                                prLabels |= GitHubApi.PrLabel.VersionConflict;
-                            }
-                            else
-                            {
-                                buildsMd.AddRow("✔️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
-                                    $"v{status.Version} - {diffLink}");
+                                if (task.HaveVersion != null &&
+                                    Version.Parse(status.Version!) <= Version.Parse(task.HaveVersion))
+                                {
+                                    buildsMd.AddRow("⚠️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
+                                        $"{(status.Version == task.HaveVersion ? "Same" : "Lower")} version!!! v{status.Version} - {diffLink}");
+                                    prLabels |= GitHubApi.PrLabel.VersionConflict;
+                                }
+                                else
+                                {
+                                    buildsMd.AddRow("✔️", $"{task.InternalName} [{task.Channel}]", fancyCommit,
+                                        $"v{status.Version} - {diffLink}");
+                                }
                             }
 
-                            if (!string.IsNullOrEmpty(prNumber) && !commit)
+                            if (!string.IsNullOrEmpty(prNumber) && mode == ModeOfOperation.PullRequest)
                                 await webservices.RegisterPrNumber(task.InternalName, task.Manifest.Plugin.Commit,
                                     prNumber);
-                            
+
                             if (status.DiffLinesAdded.HasValue)
                             {
-                                if (status.DiffLinesAdded > 400 && !prLabels.HasFlag(GitHubApi.PrLabel.SizeLarge))
-                                {
-                                    prLabels &= ~GitHubApi.PrLabel.SizeSmall;
-                                    prLabels |= GitHubApi.PrLabel.SizeMid;
-                                }
-                                else if (status.DiffLinesAdded > 1000)
+                                if (status.DiffLinesAdded > 1000)
                                 {
                                     prLabels &= ~GitHubApi.PrLabel.SizeSmall;
                                     prLabels &= ~GitHubApi.PrLabel.SizeMid;
                                     prLabels |= GitHubApi.PrLabel.SizeLarge;
                                 }
+                                else if (status.DiffLinesAdded > 400 && !prLabels.HasFlag(GitHubApi.PrLabel.SizeLarge))
+                                {
+                                    prLabels &= ~GitHubApi.PrLabel.SizeSmall;
+                                    prLabels |= GitHubApi.PrLabel.SizeMid;
+                                }
                                 else if (!prLabels.HasFlag(GitHubApi.PrLabel.SizeMid) && !prLabels.HasFlag(GitHubApi.PrLabel.SizeLarge))
                                     prLabels |= GitHubApi.PrLabel.SizeSmall;
                             }
 
-                            if (commit)
+                            if (mode == ModeOfOperation.Commit)
                             {
                                 int? prInt = null;
                                 if (int.TryParse(
@@ -348,9 +423,9 @@ class Program
                 var anyTried = numTried > 0;
                 var anyFailed = numFailed > 0;
 
-                if (repoName != null && prNumber != null)
+                if (mode == ModeOfOperation.PullRequest)
                 {
-                    var existingMessages = await webservices.GetMessageIds(prNumber);
+                    var existingMessages = await webservices.GetMessageIds(prNumber!);
                     var alreadyPosted = existingMessages.Length > 0;
 
                     var links =
@@ -361,15 +436,31 @@ class Program
                         commentText =
                             "⚠️ No builds attempted! This probably means that your owners property is misconfigured.";
 
-                    var prNum = int.Parse(prNumber);
+                    var prNum = int.Parse(prNumber!);
 
                     var crossOutTask = gitHubApi?.CrossOutAllOfMyComments(prNum);
 
+                    var anyComments = true;
                     if (crossOutTask != null)
-                        await crossOutTask;
+                        anyComments = await crossOutTask;
+
+                    var mergeTimeText = string.Empty;
+                    if (!anyComments && stats != null)
+                    {
+                        var timeText = stats.MeanMergeTimeUpdate.TotalHours switch
+                        {
+                            < 1 => "less than an hour",
+                            1 => "1 hour",
+                            > 1 and < 24 => $"{stats.MeanMergeTimeUpdate.Hours} hours",
+                            _ => "more than a day"
+                        };
+
+                        mergeTimeText =
+                            $"\nThe average merge time for plugin updates is currently {timeText}.";
+                    }
 
                     var commentTask = gitHubApi?.AddComment(prNum,
-                        commentText + "\n\n" + buildsMd + "\n##### " + links);
+                        commentText + mergeTimeText + "\n\n" + buildsMd + "\n##### " + links);
 
                     if (commentTask != null)
                         await commentTask;
@@ -390,7 +481,7 @@ class Program
                         hookTitle += " updated";
                     }
 
-                    buildInfo += anyTried ? buildsMd.GetText(true) : "No builds made.";
+                    buildInfo += anyTried ? buildsMd.GetText(true, true) : "No builds made.";
                     buildInfo = ReplaceDiscordEmotes(buildInfo);
 
                     var nameTask = tasks.FirstOrDefault(x => x.Type == BuildTask.TaskType.Build);
@@ -410,10 +501,10 @@ class Program
                         await gitHubApi.SetPrLabels(prNum, prLabels);
                 }
 
-                if (repoName != null && commit && anyTried)
+                if (repoName != null && mode == ModeOfOperation.Commit && anyTried && webhook.Client != null)
                 {
                     await webhook.Send(!anyFailed ? Color.Green : Color.Red,
-                        $"{ReplaceDiscordEmotes(buildsMd.GetText(true))}\n\n[Show log](https://github.com/ottercorp/DalamudPluginsD17/actions/runs/{actionRunId})",
+                        $"{ReplaceDiscordEmotes(buildsMd.GetText(true, true))}\n\n[Show log](https://github.com/goatcorp/DalamudPluginsD17/actions/runs/{actionRunId})",
                         "Builds committed", string.Empty);
 
 

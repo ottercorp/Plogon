@@ -14,6 +14,7 @@ using Docker.DotNet.Models;
 using LibGit2Sharp;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using PgpCore;
 using Plogon.Manifests;
 using Plogon.Repo;
 using Serilog;
@@ -30,6 +31,9 @@ public class BuildProcessor
     private readonly DirectoryInfo workFolder;
     private readonly DirectoryInfo staticFolder;
     private readonly DirectoryInfo artifactFolder;
+    private readonly byte[] secretsPrivateKeyBytes;
+    private readonly string secretsPrivateKeyPassword;
+    private readonly bool allowNonDefaultImages;
 
     private readonly DockerClient dockerClient;
 
@@ -67,29 +71,25 @@ public class BuildProcessor
         }
     };
 
-    private const string EXTENDED_IMAGE_HASH = "f2c4a5661854d0dfde2b37c5fde3f222bc225678d5ec3e96ceaf17c6b7727ed8";
-
+    private const string EXTENDED_IMAGE_HASH = "fba5ce59717fba4371149b8ae39d222a29a7f402c10e0941c85a27e8d1bb6ce4";
+    
     /// <summary>
     /// Set up build processor
     /// </summary>
-    /// <param name="repoFolder">Repo</param>
-    /// <param name="manifestFolder">Manifests</param>
-    /// <param name="workFolder">Work</param>
-    /// <param name="staticFolder">Static</param>
-    /// <param name="artifactFolder">Artifacts</param>
-    /// <param name="prDiff">Diff in unified format that contains the changes requested by the PR</param>
-    public BuildProcessor(DirectoryInfo repoFolder, DirectoryInfo manifestFolder, DirectoryInfo workFolder,
-        DirectoryInfo staticFolder, DirectoryInfo artifactFolder, string? prDiff)
+    public BuildProcessor(BuildProcessorSetup setup)
     {
-        this.repoFolder = repoFolder;
-        this.manifestFolder = manifestFolder;
-        this.workFolder = workFolder;
-        this.staticFolder = staticFolder;
-        this.artifactFolder = artifactFolder;
+        this.repoFolder = setup.RepoFolder;
+        this.manifestFolder = setup.ManifestFolder;
+        this.workFolder = setup.WorkFolder;
+        this.staticFolder = setup.StaticFolder;
+        this.artifactFolder = setup.ArtifactFolder;
+        this.secretsPrivateKeyBytes = setup.SecretsPrivateKeyBytes;
+        this.secretsPrivateKeyPassword = setup.SecretsPrivateKeyPassword;
+        this.allowNonDefaultImages = setup.AllowNonDefaultImages;
 
         this.pluginRepository = new PluginRepository(repoFolder);
-        this.manifestStorage = new ManifestStorage(manifestFolder, prDiff, true);
-        this.dalamudReleases = new DalamudReleases(workFolder.CreateSubdirectory("dalamud_releases_work"), manifestFolder);
+        this.manifestStorage = new ManifestStorage(manifestFolder, setup.PrDiff, true, setup.CutoffDate);
+        this.dalamudReleases = new DalamudReleases(setup.BuildOverridesFile, workFolder.CreateSubdirectory("dalamud_releases_work"));
 
         this.dockerClient = new DockerClientConfiguration().CreateClient();
     }
@@ -167,8 +167,9 @@ public class BuildProcessor
     /// <summary>
     /// Get all tasks that need to be done
     /// </summary>
+    /// <param name="continuous">If we are running a continuous verification build.</param>
     /// <returns>A set of tasks that are pending</returns>
-    public ISet<BuildTask> GetBuildTasks()
+    public ISet<BuildTask> GetBuildTasks(bool continuous)
     {
         var tasks = new HashSet<BuildTask>();
 
@@ -201,21 +202,24 @@ public class BuildProcessor
                 var state = this.pluginRepository.GetPluginState(channel.Key, manifest.Key);
                 var isInAnyChannel = this.pluginRepository.IsPluginInAnyChannel(manifest.Key);
 
-                if (state == null || state.BuiltCommit != manifest.Value.Plugin.Commit)
+                if (state != null && state.BuiltCommit == manifest.Value.Plugin.Commit && !continuous) 
+                    continue;
+
+                if (manifest.Value.Build?.Image != null && !allowNonDefaultImages)
+                    continue;
+                    
+                tasks.Add(new BuildTask
                 {
-                    tasks.Add(new BuildTask
-                    {
-                        InternalName = manifest.Key,
-                        Manifest = manifest.Value,
-                        Channel = channel.Key,
-                        HaveCommit = state?.BuiltCommit,
-                        HaveTimeBuilt = state?.TimeBuilt,
-                        HaveVersion = state?.EffectiveVersion,
-                        IsNewPlugin = state == null && !isInAnyChannel,
-                        IsNewInThisChannel = state == null && isInAnyChannel,
-                        Type = BuildTask.TaskType.Build,
-                    });
-                }
+                    InternalName = manifest.Key,
+                    Manifest = manifest.Value,
+                    Channel = channel.Key,
+                    HaveCommit = state?.BuiltCommit,
+                    HaveTimeBuilt = state?.TimeBuilt,
+                    HaveVersion = state?.EffectiveVersion,
+                    IsNewPlugin = state == null && !isInAnyChannel,
+                    IsNewInThisChannel = state == null && isInAnyChannel,
+                    Type = BuildTask.TaskType.Build,
+                });
             }
         }
 
@@ -364,13 +368,15 @@ public class BuildProcessor
 
         var result = new PluginDiff();
 
+        var url = host.AbsoluteUri.Replace(".git", string.Empty);
+
         switch (host.Host)
         {
             case "github.com":
-                result.DiffUrl =  $"{host.AbsoluteUri[..^4]}/compare/{haveCommit}..{wantCommit}";
+                result.DiffUrl =  $"{url}/compare/{haveCommit}..{wantCommit}";
                 break;
             case "gitlab.com":
-                result.DiffUrl = $"{host.AbsoluteUri[..^4]}/-/compare/{haveCommit}...{wantCommit}";
+                result.DiffUrl = $"{url}/-/compare/{haveCommit}...{wantCommit}";
                 break;
         }
         
@@ -436,6 +442,12 @@ public class BuildProcessor
 
         if (!string.IsNullOrEmpty(result.DiffUrl)) 
             return result;
+
+        if (haveCommit == emptyTree)
+        {
+            result.DiffUrl = url;
+            return result;
+        }
 
         var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
         res.EnsureSuccessStatusCode();
@@ -540,6 +552,7 @@ public class BuildProcessor
             this.DiffLinesAdded = diff?.DiffLinesAdded;
             this.DiffLinesRemoved = diff?.DiffLinesRemoved;
             this.Version = version;
+            this.PreviousVersion = task.HaveVersion;
             this.Task = task;
         }
 
@@ -557,7 +570,12 @@ public class BuildProcessor
         /// The version of the plugin artifact
         /// </summary>
         public string? Version { get; private set; }
-
+        
+        /// <summary>
+        /// The previous version of this plugin in this channel
+        /// </summary>
+        public string? PreviousVersion { get; private set; }
+        
         /// <summary>
         /// The task that was processed
         /// </summary>
@@ -602,7 +620,37 @@ public class BuildProcessor
             }
         }
     }
-    
+
+    private static void ParanoiaValidateTask(BuildTask task)
+    {
+        // Take care, this could still match a branch or tag name
+        // Verified by CheckIfTrueCommit() later
+        var gitShaRegex = new Regex("^[0-9a-f]{5,40}$");
+        if (!gitShaRegex.IsMatch(task.Manifest!.Plugin.Commit))
+            throw new Exception("Provided commit hash is not a valid Git SHA.");
+    }
+
+    private async Task<Dictionary<string, string>> DecryptSecrets(BuildTask task)
+    {
+        if (task.Manifest!.Plugin.Secrets.Count == 0)
+            return new Dictionary<string, string>();
+        
+        // Load keys
+        EncryptionKeys encryptionKeys;
+        await using (Stream privateKeyStream = new MemoryStream(secretsPrivateKeyBytes))
+            encryptionKeys = new EncryptionKeys(privateKeyStream, secretsPrivateKeyPassword);
+
+        var pgp = new PGP(encryptionKeys);
+
+        var decrypted = new Dictionary<string, string>();
+        foreach (var secret in task.Manifest.Plugin.Secrets)
+        {
+            decrypted.Add(secret.Key, await pgp.DecryptArmoredStringAsync(secret.Value));
+        }
+
+        return decrypted;
+    }
+
     /// <summary>
     /// Check out and build a plugin from a task
     /// </summary>
@@ -630,7 +678,12 @@ public class BuildProcessor
 
         if (task.Manifest == null)
             throw new Exception("Manifest was null");
-
+        
+        if (string.IsNullOrWhiteSpace(task.Manifest.Plugin.Commit))
+            throw new Exception("No commit specified");
+        
+        ParanoiaValidateTask(task);
+        
         var folderName = $"{task.InternalName}-{task.Manifest.Plugin.Commit}";
         var work = this.workFolder.CreateSubdirectory($"{folderName}-work");
         var output = this.workFolder.CreateSubdirectory($"{folderName}-output");
@@ -645,9 +698,6 @@ public class BuildProcessor
         if (!task.Manifest.Plugin.Repository.StartsWith("https://") ||
             !task.Manifest.Plugin.Repository.EndsWith(".git"))
             throw new Exception("Only HTTPS repository URLs ending in .git are supported");
-
-        if (string.IsNullOrWhiteSpace(task.Manifest.Plugin.Commit))
-            throw new Exception("No commit specified");
 
         task.Manifest.Plugin.ProjectPath ??= string.Empty;
 
@@ -687,7 +737,33 @@ public class BuildProcessor
         await RetryUntil(async () => await GetNeeds(task, needs));
         await RetryUntil(async () => await RestoreAllPackages(task, work, packages));
         var needsExtendedImage = task.Manifest?.Build?.Image == "extended";
+        
+        var dockerEnv = new List<string>
+        {
+            $"PLOGON_PROJECT_DIR={task.Manifest!.Plugin.ProjectPath}",
+            $"PLOGON_PLUGIN_NAME={task.InternalName}",
+            $"PLOGON_PLUGIN_COMMIT={task.Manifest.Plugin.Commit}",
+            $"PLOGON_PLUGIN_VERSION={task.Manifest.Plugin.Version}",
+            "DALAMUD_LIB_PATH=/work/dalamud/"
+        };
 
+        // Decrypt secrets and add them as env vars to the container, so that msbuild can see them
+        var secrets = await DecryptSecrets(task);
+        foreach (var secret in secrets)
+        {
+            var bannedCharacters = new[] { '=', ';', '"' , '\''};
+            if (secret.Key.Any(x => bannedCharacters.Contains(x)) ||
+                secret.Value.Any(x => bannedCharacters.Contains(x)))
+            {
+                throw new Exception("Disallowed characters in secret name or value.");
+            }
+
+            var secretName = $"PLOGON_SECRET_{secret.Key}";
+            dockerEnv.Add($"{secretName}={secret.Value}");
+            
+            Log.Verbose("Added secret {Name}", secretName);
+        }
+        
         var containerCreateResponse = await this.dockerClient.Containers.CreateContainerAsync(
             new CreateContainerParameters
             {
@@ -712,14 +788,7 @@ public class BuildProcessor
                         $"{needs.FullName}:/needs:ro"
                     }
                 },
-                Env = new List<string>
-                {
-                    $"PLOGON_PROJECT_DIR={task.Manifest!.Plugin.ProjectPath}",
-                    $"PLOGON_PLUGIN_NAME={task.InternalName}",
-                    $"PLOGON_PLUGIN_COMMIT={task.Manifest.Plugin.Commit}",
-                    $"PLOGON_PLUGIN_VERSION={task.Manifest.Plugin.Version}",
-                    "DALAMUD_LIB_PATH=/work/dalamud/"
-                },
+                Env = dockerEnv,
                 Entrypoint = new List<string>
                 {
                     "/static/entrypoint.sh"
