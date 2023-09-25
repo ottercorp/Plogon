@@ -515,7 +515,7 @@ class Program
                             continue;
 
                         var resultPrNum =
-                            await webservices.GetPrNumber(buildResult.Task.InternalName, buildResult.Version!);
+                            await webservices.GetPrNumber(buildResult.Task.InternalName, buildResult.Task.Manifest!.Plugin.Commit);
                         if (resultPrNum == null)
                         {
                             Log.Warning("No PR for {InternalName} - {Version}", buildResult.Task.InternalName,
