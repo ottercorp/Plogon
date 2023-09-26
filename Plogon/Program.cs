@@ -504,7 +504,7 @@ class Program
                 if (repoName != null && mode == ModeOfOperation.Commit && anyTried && webhook.Client != null)
                 {
                     await webhook.Send(!anyFailed ? Color.Green : Color.Red,
-                        $"{ReplaceDiscordEmotes(buildsMd.GetText(true, true))}\n\n[Show log](https://github.com/goatcorp/DalamudPluginsD17/actions/runs/{actionRunId})",
+                        $"{ReplaceDiscordEmotes(buildsMd.GetText(true, true))}\n\n[Show log](https://github.com/ottercorp/DalamudPluginsD17/actions/runs/{actionRunId})",
                         "Builds committed", string.Empty);
 
 
