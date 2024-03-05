@@ -13,7 +13,7 @@ public static class PlogonSystemDefine
     /// <summary>
     /// PAC members, github logins.
     /// </summary>
-    public static readonly string[] PacMembers = new[] { "goaaats", "reiichi001", "lmcintyre", "ackwell", "karashiiro", "philpax" };
+    public static readonly string[] PacMembers = new[] { "Bluefissure", "MapleRecall", "Loskh", "wozaiha", "subjadeites" };
     
     /// <summary>
     /// Label for a new plugin.
