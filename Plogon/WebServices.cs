@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Threading.Tasks;
+
 using Serilog;
 #pragma warning disable CS1591
 
@@ -14,14 +15,14 @@ namespace Plogon;
 /// </summary>
 public class WebServices
 {
-    private readonly string key;
+    private readonly string? key;
 
     /// <summary>
     /// ctor
     /// </summary>
     public WebServices()
     {
-        this.key = Environment.GetEnvironmentVariable("XLWEB_KEY")!;
+        this.key = Environment.GetEnvironmentVariable("XLWEB_KEY");
     }
 
     /// <summary>
@@ -31,6 +32,8 @@ public class WebServices
     /// <param name="messageId"></param>
     public async Task RegisterMessageId(string prNumber, ulong messageId)
     {
+        if (this.key is null) return;
+
         using var client = new HttpClient();
         var result = await client.PostAsync(
             $"https://aonyx.ffxiv.wang/Plogon/RegisterMessageId?key={this.key}&prNumber={prNumber}&messageId={messageId}",
@@ -45,6 +48,8 @@ public class WebServices
     /// <returns></returns>
     public async Task<string[]> GetMessageIds(string prNumber)
     {
+        if (this.key is null) return Array.Empty<string>();
+
         using var client = new HttpClient();
         var result = await client.GetAsync(
             $"https://aonyx.ffxiv.wang/Plogon/GetMessageIds?prNumber={prNumber}");
@@ -61,11 +66,13 @@ public class WebServices
     /// <param name="prNumber"></param>
     public async Task RegisterPrNumber(string internalName, string version, string prNumber)
     {
+        if (this.key is null) return;
+
         using var client = new HttpClient();
         var result = await client.PostAsync(
             $"https://aonyx.ffxiv.wang/Plogon/RegisterVersionPrNumber?key={this.key}&prNumber={prNumber}&internalName={internalName}&version={version}",
             null);
-        
+
         Log.Information(await result.Content.ReadAsStringAsync());
         result.EnsureSuccessStatusCode();
     }
@@ -78,20 +85,22 @@ public class WebServices
     /// <returns></returns>
     public async Task<string?> GetPrNumber(string internalName, string version)
     {
+        if (this.key is null) return null;
+
         using var client = new HttpClient();
         var result = await client.GetAsync(
             $"https://aonyx.ffxiv.wang/Plogon/GetVersionChangelog?internalName={internalName}&version={version}");
 
         if (result.StatusCode == HttpStatusCode.NotFound)
             return null;
-        
+
         var text = await result.Content.ReadAsStringAsync();
         Log.Information("PR: {Text}", text);
         result.EnsureSuccessStatusCode();
 
         return text;
     }
-    
+
     public class StagedPluginInfo
     {
         public string InternalName { get; set; } = null!;
@@ -103,15 +112,17 @@ public class WebServices
         public int? DiffLinesAdded { get; set; }
         public int? DiffLinesRemoved { get; set; }
     }
-    
+
     public async Task StagePluginBuild(StagedPluginInfo info)
     {
+        if (this.key is null) return;
+
         using var client = new HttpClient();
         client.DefaultRequestHeaders.Add("X-XL-Key", this.key);
         var result = await client.PostAsync(
             $"https://kamori.goats.dev/Plogon/StagePluginBuild",
             JsonContent.Create(info));
-        
+
         Log.Information(await result.Content.ReadAsStringAsync());
         result.EnsureSuccessStatusCode();
     }
@@ -124,6 +135,8 @@ public class WebServices
 
     public async Task<Stats?> GetStats()
     {
+        if (this.key is null) return null;
+
         try
         {
             using var client = new HttpClient();

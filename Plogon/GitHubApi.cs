@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
+
 using Octokit;
 
 namespace Plogon;
@@ -31,6 +32,21 @@ public class GitHubApi
             Credentials = new Credentials(token)
         };
     }
+    
+    /// <summary>
+    /// Authenticated GitHub client.
+    /// </summary>
+    public GitHubClient Client => this.ghClient;
+    
+    /// <summary>
+    /// Repo owner.
+    /// </summary>
+    public string RepoOwner => this.repoOwner;
+    
+    /// <summary>
+    /// Repo name.
+    /// </summary>
+    public string RepoName => this.repoName;
 
     /// <summary>
     /// Add comment to issue
@@ -62,7 +78,7 @@ public class GitHubApi
             if (comment.User.Id != me.Id)
                 continue;
             any = true;
-            
+
             // Only do this once
             if (comment.Body.StartsWith("<details>"))
                 continue;
@@ -99,15 +115,26 @@ public class GitHubApi
 
         return pr.Body;
     }
+
+    /// <summary>
+    /// Get the PR for a given number.
+    /// </summary>
+    /// <param name="number">The PR number.</param>
+    /// <returns>The PR.</returns>
+    public async Task<PullRequest?> GetPullRequest(int number)
+    {
+        return await this.ghClient.PullRequest.Get(repoOwner, repoName, number);
+    }
     
-    private const string PR_LABEL_NEW_PLUGIN = "new plugin";
-    private const string PR_LABEL_NEED_ICON = "need icon";
-    private const string PR_LABEL_BUILD_FAILED = "build failed";
-    private const string PR_LABEL_VERSION_CONFLICT = "version conflict";
-    private const string PR_LABEL_MOVE_CHANNEL = "move channel";
-    private const string PR_LABEL_SIZE_SMALL = "size-small";
-    private const string PR_LABEL_SIZE_MID = "size-mid";
-    private const string PR_LABEL_SIZE_LARGE = "size-large";
+    /// <summary>
+    /// Add an assignee.
+    /// </summary>
+    /// <param name="number">The PR number.</param>
+    /// <param name="assignee">GitHub login to assign.</param>
+    public async Task Assign(int number, string assignee)
+    {
+        await this.ghClient.Issue.Assignee.AddAssignees(repoOwner, repoName, number, new AssigneesUpdate(new []{ assignee }));
+    }
 
     /// <summary>
     /// Labels for DIP17 PRs
@@ -119,42 +146,42 @@ public class GitHubApi
         /// No label
         /// </summary>
         None = 0,
-        
+
         /// <summary>
         /// "new plugin"
         /// </summary>
         NewPlugin = 1 << 0,
-        
+
         /// <summary>
         /// "need icon"
         /// </summary>
         NeedIcon = 1 << 1,
-        
+
         /// <summary>
         /// "build failed"
         /// </summary>
         BuildFailed = 1 << 2,
-        
+
         /// <summary>
         /// "version conflict"
         /// </summary>
         VersionConflict = 1 << 3,
-        
+
         /// <summary>
         /// "move channel"
         /// </summary>
         MoveChannel = 1 << 4,
-        
+
         /// <summary>
         /// "size-s"
         /// </summary>
         SizeSmall = 1 << 5,
-        
+
         /// <summary>
         /// "size-m"
         /// </summary>
         SizeMid = 1 << 6,
-        
+
         /// <summary>
         /// "size-l"
         /// </summary>
@@ -169,7 +196,7 @@ public class GitHubApi
     public async Task SetPrLabels(int issueNumber, PrLabel label)
     {
         var managedLabels = new HashSet<string>();
-        
+
         var existing = await this.ghClient.Issue.Labels.GetAllForIssue(repoOwner, repoName, issueNumber);
         if (existing != null)
         {
@@ -180,44 +207,44 @@ public class GitHubApi
         }
 
         if (label.HasFlag(PrLabel.NewPlugin))
-            managedLabels.Add(PR_LABEL_NEW_PLUGIN);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_NEW_PLUGIN);
         else
-            managedLabels.Remove(PR_LABEL_NEW_PLUGIN);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_NEW_PLUGIN);
+
         if (label.HasFlag(PrLabel.NeedIcon))
-            managedLabels.Add(PR_LABEL_NEED_ICON);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_NEED_ICON);
         else
-            managedLabels.Remove(PR_LABEL_NEED_ICON);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_NEED_ICON);
+
         if (label.HasFlag(PrLabel.BuildFailed))
-            managedLabels.Add(PR_LABEL_BUILD_FAILED);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_BUILD_FAILED);
         else
-            managedLabels.Remove(PR_LABEL_BUILD_FAILED);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_BUILD_FAILED);
+
         if (label.HasFlag(PrLabel.VersionConflict))
-            managedLabels.Add(PR_LABEL_VERSION_CONFLICT);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_VERSION_CONFLICT);
         else
-            managedLabels.Remove(PR_LABEL_VERSION_CONFLICT);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_VERSION_CONFLICT);
+
         if (label.HasFlag(PrLabel.MoveChannel))
-            managedLabels.Add(PR_LABEL_MOVE_CHANNEL);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_MOVE_CHANNEL);
         else
-            managedLabels.Remove(PR_LABEL_MOVE_CHANNEL);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_MOVE_CHANNEL);
+
         if (label.HasFlag(PrLabel.SizeSmall))
-            managedLabels.Add(PR_LABEL_SIZE_SMALL);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_SMALL);
         else
-            managedLabels.Remove(PR_LABEL_SIZE_SMALL);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_SMALL);
+
         if (label.HasFlag(PrLabel.SizeMid))
-            managedLabels.Add(PR_LABEL_SIZE_MID);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_MID);
         else
-            managedLabels.Remove(PR_LABEL_SIZE_MID);
-        
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_MID);
+
         if (label.HasFlag(PrLabel.SizeLarge))
-            managedLabels.Add(PR_LABEL_SIZE_LARGE);
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
         else
-            managedLabels.Remove(PR_LABEL_SIZE_LARGE);
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
 
         await this.ghClient.Issue.Labels.ReplaceAllForIssue(repoOwner, repoName, issueNumber, managedLabels.ToArray());
     }

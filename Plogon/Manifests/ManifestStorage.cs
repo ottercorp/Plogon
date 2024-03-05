@@ -1,10 +1,12 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+
 using Serilog;
+
 using Tomlyn;
 #pragma warning disable CS1591
 
@@ -83,7 +85,7 @@ public class ManifestStorage
                         continue;
                     }
                 }
-                
+
                 var tomlText = tomlFile.OpenText().ReadToEnd();
                 var manifest = Toml.ToModel<Manifest>(tomlText);
 
@@ -98,11 +100,11 @@ public class ManifestStorage
 
         return manifests;
     }
-    
+
     private ISet<string> GetAffectedManifestsFromDiff(string prDiff)
     {
         var manifestFiles = new HashSet<string>();
-        
+
         var rx = new Regex(@"((?:\+\+\+\s+b\/)|(?:rename to\s+))(.*\.toml)", RegexOptions.IgnoreCase);
         foreach (Match match in rx.Matches(prDiff))
         {

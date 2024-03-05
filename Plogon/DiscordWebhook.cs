@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
+
 using Discord;
 using Discord.Webhook;
 
@@ -18,12 +19,11 @@ public class DiscordWebhook
     /// <summary>
     /// Init with webhook from env var
     /// </summary>
-    public DiscordWebhook()
+    public DiscordWebhook(string? url)
     {
-        var url = Environment.GetEnvironmentVariable("DISCORD_WEBHOOK");
         if (string.IsNullOrEmpty(url))
             return;
-        
+
         this.Client = new DiscordWebhookClient(url);
     }
 
