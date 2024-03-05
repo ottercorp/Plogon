@@ -120,7 +120,7 @@ public class WebServices
         using var client = new HttpClient();
         client.DefaultRequestHeaders.Add("X-XL-Key", this.key);
         var result = await client.PostAsync(
-            $"https://kamori.goats.dev/Plogon/StagePluginBuild",
+            $"https://aonyx.ffxiv.wang/Plogon/StagePluginBuild",
             JsonContent.Create(info));
 
         Log.Information(await result.Content.ReadAsStringAsync());
@@ -142,7 +142,7 @@ public class WebServices
             using var client = new HttpClient();
             client.DefaultRequestHeaders.Add("X-XL-Key", this.key);
             var result = await client.GetAsync(
-                "https://kamori.goats.dev/Plogon/Stats");
+                "https://aonyx.ffxiv.wang/Plogon/Stats");
 
             result.EnsureSuccessStatusCode();
             return await result.Content.ReadFromJsonAsync<Stats>();
