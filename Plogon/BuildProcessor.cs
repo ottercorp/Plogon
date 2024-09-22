@@ -69,6 +69,7 @@ public class BuildProcessor
 
     private const string DOCKER_IMAGE = "mcr.microsoft.com/dotnet/sdk";
     private const string DOCKER_TAG = "8.0";
+
     // This field specifies which dependency package is to be fetched depending on the .net target framework.
     // The values to use in turn depend on the used SDK (see DOCKER_TAG) and what gets resolved at compile time.
     // If a plugin breaks with a missing runtime package you might want to add the package here.
@@ -89,6 +90,17 @@ public class BuildProcessor
         { "net8.0", new[]
             { "8.0.0" }
         }
+    };
+
+    // This field specifies a list of packages that must be present in the package cache, no matter
+    // whether they are present in the lockfile. This is necessary for SDK packages, as they are not
+    // added to lockfiles.
+    private readonly Dictionary<string, string[]> FORCE_PACKAGES = new()
+    {
+        { "Dalamud.NET.Sdk", new[]
+            // This should have all of the SDK packages we still support.
+            { "9.0.2", "10.0.0" }
+        },
     };
 
     private const string EXTENDED_IMAGE_HASH = "fba5ce59717fba4371149b8ae39d222a29a7f402c10e0941c85a27e8d1bb6ce4";
@@ -128,7 +140,7 @@ public class BuildProcessor
         /// <summary>
         /// Path to file containing overrides for the Dalamud version used.
         /// </summary>
-        public FileInfo BuildOverridesFile { get; set; }
+        public FileInfo? BuildOverridesFile { get; set; }
 
         /// <summary>
         /// Whether or not non-default build images are allowed.
@@ -389,6 +401,11 @@ public class BuildProcessor
         {
             Log.Warning(e, "Failed to fetch runtime dependency");
         }
+
+        foreach (var (name, versions) in this.FORCE_PACKAGES)
+        {
+            await Task.WhenAll(versions.Select(version => GetDependency(name, new() { Resolved = version }, pkgFolder, client)));
+        }
     }
 
     async Task GetNeeds(BuildTask task, DirectoryInfo needs)
@@ -424,29 +441,18 @@ public class BuildProcessor
         [JsonPropertyName("key")]
         public string? Key { get; set; }
     };
-
+    
     /// <summary>
-    /// Info about a diff
+    /// A set of diffs.
     /// </summary>
-    public class PluginDiff
-    {
-        /// <summary>
-        /// URL to reach the diff at
-        /// </summary>
-        public string DiffUrl = null!;
+    /// <param name="HosterUrl">Url on git hosting platform.</param>
+    /// <param name="RegularDiffLink">Regular diff info.</param>
+    /// <param name="SemanticDiffLink">Semantic diff info.</param>
+    /// <param name="LinesAdded">Number of lines added.</param>
+    /// <param name="LinesRemoved">Number of lines removed.</param>
+    public record PluginDiffSet(string? HosterUrl, string? RegularDiffLink, string? SemanticDiffLink, int LinesAdded, int LinesRemoved);
 
-        /// <summary>
-        /// How many lines were added
-        /// </summary>
-        public int DiffLinesAdded;
-
-        /// <summary>
-        /// How many lines were removed
-        /// </summary>
-        public int DiffLinesRemoved;
-    }
-
-    private async Task<PluginDiff> GetPluginDiff(DirectoryInfo workDir, BuildTask task, IEnumerable<BuildTask> tasks)
+    private async Task<PluginDiffSet> GetPluginDiff(DirectoryInfo workDir, BuildTask task, IEnumerable<BuildTask> tasks, bool doSemantic)
     {
         var internalName = task.InternalName;
         var haveCommit = task.HaveCommit;
@@ -469,19 +475,18 @@ public class BuildProcessor
 
         using var client = new HttpClient();
 
-        var result = new PluginDiff();
-
         var url = host.AbsoluteUri.Replace(".git", string.Empty);
 
+        string? hosterUrl = null;
         switch (host.Host)
         {
             case "github.com":
                 // GitHub does not support diffing from 0
                 if (haveCommit != emptyTree)
-                    result.DiffUrl = $"{url}/compare/{haveCommit}..{wantCommit}";
+                    hosterUrl = $"{url}/compare/{haveCommit}..{wantCommit}";
                 break;
             case "gitlab.com":
-                result.DiffUrl = $"{url}/-/compare/{haveCommit}...{wantCommit}";
+                hosterUrl = $"{url}/-/compare/{haveCommit}...{wantCommit}";
                 break;
         }
 
@@ -489,79 +494,129 @@ public class BuildProcessor
         if (!await CheckCommitExists(workDir, haveCommit))
             haveCommit = emptyTree;
 
-        var diffPsi = new ProcessStartInfo("git",
+        async Task<string?> MakeAndUploadDiff()
+        {
+            var diffPsi = new ProcessStartInfo("git",
             $"diff --submodule=diff {haveCommit}..{wantCommit}")
-        {
-            RedirectStandardOutput = true,
-            WorkingDirectory = workDir.FullName,
-        };
-
-        var process = Process.Start(diffPsi);
-        if (process == null)
-            throw new Exception("Diff process was null.");
-
-        var diffOutput = await process.StandardOutput.ReadToEndAsync();
-        Log.Verbose("{Args}: {Length}", diffPsi.Arguments, diffOutput.Length);
-
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0)
-            throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
-
-        diffPsi = new ProcessStartInfo("git",
-            $"diff --shortstat --submodule=diff {haveCommit}..{wantCommit}")
-        {
-            RedirectStandardOutput = true,
-            WorkingDirectory = workDir.FullName,
-        };
-
-        process = Process.Start(diffPsi);
-        if (process == null)
-            throw new Exception("Diff process was null.");
-
-        var shortstatOutput = await process.StandardOutput.ReadToEndAsync();
-
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0)
-            throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
-
-        var regex = new Regex(@"^\s*(?:(?<numFilesChanged>[0-9]+) files? changed)?(?:, )?(?:(?<numInsertions>[0-9]+) insertions?\(\+\))?(?:, )?(?:(?<numDeletions>[0-9]+) deletions?\(-\))?\s*$");
-        var match = regex.Match(shortstatOutput);
-
-        result.DiffLinesAdded = 0;
-        result.DiffLinesRemoved = 0;
-
-        if (match.Success)
-        {
-            if (match.Groups.TryGetValue("numInsertions", out var groupInsertions) && int.TryParse(groupInsertions.Value, out var linesAdded))
             {
-                result.DiffLinesAdded = linesAdded;
-            }
+                RedirectStandardOutput = true,
+                WorkingDirectory = workDir.FullName,
+            };
 
-            if (match.Groups.TryGetValue("numDeletions", out var groupDeletions) && int.TryParse(groupDeletions.Value, out var linesRemoved))
+            var process = Process.Start(diffPsi);
+            if (process == null)
+                throw new Exception("Diff process was null.");
+
+            var diffOutput = await process.StandardOutput.ReadToEndAsync();
+            Log.Verbose("{Args}: {Length}", diffPsi.Arguments, diffOutput.Length);
+
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+                throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
+
+            if (haveCommit == emptyTree)
+                return null;
+
+            var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
+            res.EnsureSuccessStatusCode();
+
+            var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
+            return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+        }
+        
+        async Task<string?> MakeAndUploadSemantic()
+        {
+            var diffPsi = new ProcessStartInfo("/bin/bash",
+                                               $"-c \"set -o pipefail && git diff --submodule=diff {haveCommit}..{wantCommit} | terminal-to-html -preview\"")
             {
-                result.DiffLinesRemoved = linesRemoved;
-            }
+                RedirectStandardOutput = true,
+                WorkingDirectory = workDir.FullName,
+            };
+            
+            diffPsi.Environment["GIT_EXTERNAL_DIFF"] = "difft";
+            diffPsi.Environment["DFT_COLOR"] = "always";
+            diffPsi.Environment["DFT_WIDTH"] = "240";
+
+            var process = Process.Start(diffPsi);
+            if (process == null)
+                throw new Exception("Diff process was null.");
+
+            var diffOutput = await process.StandardOutput.ReadToEndAsync();
+            Log.Verbose("{Args}: {Length}", diffPsi.Arguments, diffOutput.Length);
+
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+                throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
+
+            if (haveCommit == emptyTree)
+                return null;
+
+            var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
+            res.EnsureSuccessStatusCode();
+
+            var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
+            return $"https://haste.soulja-boy-told.me/raw/{json!.Key}.html";
         }
 
-        Log.Verbose("{Args}: {Output} - {Length}, +{LinesAdded} -{LinesRemoved}", diffPsi.Arguments, shortstatOutput, shortstatOutput.Length, result.DiffLinesAdded, result.DiffLinesRemoved);
-
-        if (!string.IsNullOrEmpty(result.DiffUrl))
-            return result;
-
-        if (haveCommit == emptyTree)
+        var linesAdded = 0;
+        var linesRemoved = 0;
+        
+        // shortstat
         {
-            result.DiffUrl = url;
-            return result;
+            var diffPsi = new ProcessStartInfo("git",
+                                           $"diff --shortstat --submodule=diff {haveCommit}..{wantCommit}")
+            {
+                RedirectStandardOutput = true,
+                WorkingDirectory = workDir.FullName,
+            };
+
+            var process = Process.Start(diffPsi);
+            if (process == null)
+                throw new Exception("Diff process was null.");
+
+            var shortstatOutput = await process.StandardOutput.ReadToEndAsync();
+
+            await process.WaitForExitAsync();
+            if (process.ExitCode != 0)
+                throw new Exception($"Git could not diff: {process.ExitCode} -- {diffPsi.Arguments}");
+            
+
+            var regex = new Regex(@"^\s*(?:(?<numFilesChanged>[0-9]+) files? changed)?(?:, )?(?:(?<numInsertions>[0-9]+) insertions?\(\+\))?(?:, )?(?:(?<numDeletions>[0-9]+) deletions?\(-\))?\s*$");
+            var match = regex.Match(shortstatOutput);
+
+            if (match.Success)
+            {
+                if (!match.Groups.TryGetValue("numInsertions", out var groupInsertions) || !int.TryParse(groupInsertions?.Value, out linesAdded))
+                {
+                    Log.Error("Could not parse insertions");
+                }
+
+                if (!match.Groups.TryGetValue("numDeletions", out var groupDeletions) || !int.TryParse(groupDeletions?.Value, out linesRemoved))
+                {
+                    Log.Error("Could not parse deletions");
+                }
+            }
+            
+            Log.Verbose("{Args}: {Output} - {Length}, +{LinesAdded} -{LinesRemoved}", diffPsi.Arguments, shortstatOutput, shortstatOutput.Length, linesAdded, linesRemoved);
         }
+        
+        var diffNormal = await MakeAndUploadDiff();
 
-        var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
-        res.EnsureSuccessStatusCode();
+        string? diffSemantic = null;
 
-        var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
-
-        result.DiffUrl = $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
-
-        return result;
+        if (doSemantic)
+        {
+            try
+            {
+                diffSemantic = await MakeAndUploadSemantic();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Semantic diff failed");
+            }
+        }
+        
+        return new PluginDiffSet(hosterUrl, diffNormal, diffSemantic, linesAdded, linesRemoved);
     }
 
     private async Task<bool> CheckCommitExists(DirectoryInfo workDir, string commit)
@@ -652,12 +707,10 @@ public class BuildProcessor
         /// <param name="diff">diff url</param>
         /// <param name="version">plugin version</param>
         /// <param name="task">processed task</param>
-        public BuildResult(bool success, PluginDiff? diff, string? version, BuildTask task)
+        public BuildResult(bool success, PluginDiffSet? diff, string? version, BuildTask task)
         {
             this.Success = success;
-            this.DiffUrl = diff?.DiffUrl;
-            this.DiffLinesAdded = diff?.DiffLinesAdded;
-            this.DiffLinesRemoved = diff?.DiffLinesRemoved;
+            this.Diff = diff;
             this.Version = version;
             this.PreviousVersion = task.HaveVersion;
             this.Task = task;
@@ -671,7 +724,7 @@ public class BuildProcessor
         /// <summary>
         /// Where the diff is
         /// </summary>
-        public string? DiffUrl { get; private set; }
+        public PluginDiffSet? Diff { get; private set; }
 
         /// <summary>
         /// The version of the plugin artifact
@@ -687,16 +740,6 @@ public class BuildProcessor
         /// The task that was processed
         /// </summary>
         public BuildTask Task { get; private set; }
-
-        /// <summary>
-        /// The amount of lines added, if available.
-        /// </summary>
-        public int? DiffLinesAdded { get; private set; }
-
-        /// <summary>
-        /// The amount of lines removed, if available.
-        /// </summary>
-        public int? DiffLinesRemoved { get; private set; }
     }
 
     private class LegacyPluginManifest
@@ -706,6 +749,9 @@ public class BuildProcessor
 
         [JsonProperty]
         public string? InternalName { get; set; }
+        
+        [JsonProperty]
+        public int? DalamudApiLevel { get; set; }
     }
 
     static async Task RetryUntil(Func<Task> what, int maxTries = 10)
@@ -758,6 +804,13 @@ public class BuildProcessor
         }
 
         return decrypted;
+    }
+
+    private static void WriteNugetConfig(FileInfo output)
+    {
+        var nugetConfigText =
+            $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <packageSources>\n    <clear />\n    <add key=\"plogon\" value=\"/packages\" />\n  </packageSources>\n</configuration>";
+        File.WriteAllText(output.FullName, nugetConfigText);
     }
 
     /// <summary>
@@ -847,10 +900,12 @@ public class BuildProcessor
             new FileInfo(Path.Combine(this.workFolder.FullName, $"{taskFolderName}-{archive.Name}.zip"));
         ZipFile.CreateFromDirectory(archive.FullName, archiveZipFile.FullName);
         
-        var diff = await GetPluginDiff(work, task, otherTasks);
+        var diff = await GetPluginDiff(work, task, otherTasks, !commit);
 
         var dalamudAssemblyDir = await this.dalamudReleases.GetDalamudAssemblyDirAsync(task.Channel);
 
+        WriteNugetConfig(new FileInfo(Path.Combine(work.FullName, "nuget.config")));
+        
         await RetryUntil(async () => await GetNeeds(task, needs));
         await RetryUntil(async () => await RestoreAllPackages(task, work, packages));
         var needsExtendedImage = task.Manifest?.Build?.Image == "extended";
@@ -1010,6 +1065,10 @@ public class BuildProcessor
                     throw new Exception("Internal name in generated manifest JSON differs from DIP17 folder name.");
 
                 version = manifest.AssemblyVersion ?? throw new Exception("AssemblyVersion in generated manifest was null");
+                
+                // TODO: Get this from an API or something
+                if (manifest.DalamudApiLevel != PlogonSystemDefine.API_LEVEL)
+                    throw new ApiLevelException(manifest.DalamudApiLevel ?? -1, PlogonSystemDefine.API_LEVEL);
             }
             catch (Exception ex)
             {
@@ -1022,7 +1081,14 @@ public class BuildProcessor
             {
                 try
                 {
-                    this.pluginRepository.UpdatePluginHave(task.Channel, task.InternalName, task.Manifest.Plugin.Commit, version!, changelog);
+                    this.pluginRepository.UpdatePluginHave(
+                        task.Channel,
+                        task.InternalName,
+                        task.Manifest.Plugin.Commit,
+                        version!,
+                        task.Manifest.Plugin.MinimumVersion,
+                        changelog);
+
                     var repoOutputDir = this.pluginRepository.GetPluginOutputDirectory(task.Channel, task.InternalName);
 
                     foreach (var file in dpOutput.GetFiles())
@@ -1119,11 +1185,6 @@ public class BuildProcessor
                     var manifestObj = JObject.Parse(manifestText);
                     manifestObj["_isDip17Plugin"] = true;
                     manifestObj["_Dip17Channel"] = task.Channel;
-
-                    // Get this from an API or something
-                    var apiLevel = manifestObj["DalamudApiLevel"]?.Value<int>();
-                    if (apiLevel is not PlogonSystemDefine.API_LEVEL)
-                        throw new ApiLevelException(apiLevel ?? 0, PlogonSystemDefine.API_LEVEL);
 
                     await File.WriteAllTextAsync(manifestFile.FullName, manifestObj.ToString());
                 }
