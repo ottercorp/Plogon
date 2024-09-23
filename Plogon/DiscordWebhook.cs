@@ -45,8 +45,8 @@ public class DiscordWebhook
     /// <param name="footer"></param>
     public async Task<ulong> Send(Color color, string message, string title, string footer)
     {
-        if (this.Client == null)
-            throw new Exception("Webhooks not set up");
+        if (this.Client == null) return 114514;
+        //throw new Exception("Webhooks not set up");
         
         if (message.Length > 4000)
         {
