@@ -77,7 +77,7 @@ class Program
         }
 
         var publicChannelWebhook = new DiscordWebhook(Environment.GetEnvironmentVariable("DISCORD_WEBHOOK"));
-        var pacChannelWebhook = new DiscordWebhook(Environment.GetEnvironmentVariable("PAC_DISCORD_WEBHOOK"));
+        //var pacChannelWebhook = new DiscordWebhook(Environment.GetEnvironmentVariable("PAC_DISCORD_WEBHOOK"));
         var webservices = new WebServices();
 
         var githubSummary = "## Build Summary\n";
@@ -551,7 +551,7 @@ class Program
                     var committedColor = !anyFailed ? Color.Green : Color.Red;
                     var committedTitle = "Builds committed";
                     await publicChannelWebhook.SendSplitting(committedColor, committedText, committedTitle, string.Empty);
-                    await pacChannelWebhook.SendSplitting(committedColor, committedText, committedTitle, string.Empty);
+                    //await pacChannelWebhook.SendSplitting(committedColor, committedText, committedTitle, string.Empty);
 
 
                     // TODO: We don't support this for removals for now
