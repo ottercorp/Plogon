@@ -53,7 +53,7 @@ public class WebServices
         using var client = new HttpClient();
         var result = await client.GetAsync(
             $"https://aonyx.ffxiv.wang/Plogon/GetMessageIds?prNumber={prNumber}");
-        result.EnsureSuccessStatusCode();
+        //result.EnsureSuccessStatusCode();
 
         return await result.Content.ReadFromJsonAsync<string[]>() ?? [];
     }
