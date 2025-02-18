@@ -1,10 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 
 using Serilog;
-
-using Tomlyn;
 
 namespace Plogon.Repo;
 
@@ -14,7 +14,7 @@ namespace Plogon.Repo;
 public class PluginRepository
 {
     private readonly DirectoryInfo repoDirectory;
-    private FileInfo StateFile => new FileInfo(Path.Combine(repoDirectory.FullName, "State.toml"));
+    private FileInfo StateFile => new FileInfo(Path.Combine(repoDirectory.FullName, "state.json"));
 
     /// <summary>
     /// Current state of the repository
@@ -31,20 +31,22 @@ public class PluginRepository
 
         if (StateFile.Exists)
         {
-            this.State = Toml.ToModel<State>(StateFile.OpenText().ReadToEnd());
+            this.State = JsonSerializer.Deserialize<State>(StateFile.OpenText().ReadToEnd())
+                ?? throw new Exception("Failed to load state");
         }
         else
         {
             this.State = new State();
-            Log.Information("State for repo at {repo} does not exist, creating new one", repoDirectory.FullName);
+            Log.Warning("State for repo at {Repo} does not exist, creating new one", repoDirectory.FullName);
         }
-
-        Log.Information("Plugin repository at {repo} initialized", repoDirectory.FullName);
     }
 
     private void SaveState()
     {
-        File.WriteAllText(this.StateFile.FullName, Toml.FromModel(this.State));
+        File.WriteAllText(this.StateFile.FullName, JsonSerializer.Serialize(this.State, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+        }));
     }
 
     /// <summary>
@@ -106,12 +108,22 @@ public class PluginRepository
     /// Update the have commit on the repo
     /// </summary>
     /// <param name="channelName">The name of the channel</param>
-    /// <param name="plugin">The internalname of the plugin</param>
+    /// <param name="internalName">The internalname of the plugin</param>
     /// <param name="haveCommit">Commit that is now have</param>
     /// <param name="effectiveVersion">New version of the plugin</param>
     /// <param name="minimumVersion">Minimum version Dalamud should still try to load.</param>
     /// <param name="changelog">Plugin changelog</param>
-    public void UpdatePluginHave(string channelName, string plugin, string haveCommit, string effectiveVersion, string? minimumVersion, string? changelog)
+    /// <param name="reviewer">Who reviewed this version</param>
+    /// <param name="needs">Needs we had for this version</param>
+    public void UpdatePluginHave(
+        string channelName,
+        string internalName,
+        string haveCommit,
+        string effectiveVersion,
+        string? minimumVersion,
+        string? changelog,
+        string reviewer,
+        IEnumerable<(string Key, string Version)> needs)
     {
         if (!this.State.Channels.ContainsKey(channelName))
         {
@@ -120,7 +132,7 @@ public class PluginRepository
 
         var channel = this.State.Channels[channelName];
 
-        if (channel.Plugins.TryGetValue(plugin, out var pluginState))
+        if (channel.Plugins.TryGetValue(internalName, out var pluginState))
         {
             pluginState.BuiltCommit = haveCommit;
             pluginState.TimeBuilt = DateTime.Now;
@@ -136,18 +148,50 @@ public class PluginRepository
                 EffectiveVersion = effectiveVersion,
                 MinimumVersion = minimumVersion,
             };
-            channel.Plugins[plugin] = pluginState;
+            channel.Plugins[internalName] = pluginState;
         }
 
-        if (!string.IsNullOrWhiteSpace(changelog))
+        pluginState.Changelogs[effectiveVersion] = new State.Channel.PluginState.PluginChangelog
         {
-            pluginState.Changelogs[effectiveVersion] = new State.Channel.PluginState.PluginChangelog()
+            Changelog = changelog,
+            TimeReleased = DateTime.Now,
+            UsedNeeds = needs.Select(x => new State.Channel.PluginState.PluginChangelog.UsedNeed
             {
-                Changelog = changelog,
-                TimeReleased = DateTime.Now,
-            };
-        }
+                Key = x.Key,
+                Version = x.Version,
+            }).ToList(),
+            Reviewer = reviewer,
+        };
 
         SaveState();
+    }
+
+    /// <summary>
+    /// Add a list of needs to the repository.
+    /// </summary>
+    /// <param name="needs">The needs to add.</param>
+    public void AddReviewedNeeds(IEnumerable<State.Need> needs)
+    {
+        foreach (var need in needs)
+        {
+            AddReviewedNeed(need);
+        }
+        
+        this.SaveState();
+    }
+    
+    /// <summary>
+    /// Add a need to the repository.
+    /// </summary>
+    /// <param name="need">The need to add.</param>
+    /// <exception cref="Exception">Thrown if the need was already reviewed.</exception>
+    private void AddReviewedNeed(State.Need need)
+    {
+        if (this.State.ReviewedNeeds.Any(x => x.Key == need.Key && x.Version == need.Version))
+        {
+            throw new Exception($"Need {need.Key}(v{need.Version}) already in state");
+        }
+        
+        this.State.ReviewedNeeds.Add(need);
     }
 }

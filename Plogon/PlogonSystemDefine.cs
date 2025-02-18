@@ -8,12 +8,40 @@ public static class PlogonSystemDefine
     /// <summary>
     /// Current API level.
     /// </summary>
-    public const int API_LEVEL = 10;
+    public const int API_LEVEL = 11;
     
     /// <summary>
     /// PAC members, github logins.
     /// </summary>
-    public static readonly string[] PacMembers = new[] { "Bluefissure", "MapleRecall", "Loskh", "wozaiha", "subjadeites" };
+    public static readonly string[] PacMembers =
+    [
+        "Bluefissure", 
+        "MapleRecall", 
+        "Loskh", 
+        "wozaiha", 
+        "subjadeites"
+    ];
+
+    /// <summary>
+    /// Nuget namespaces/packages we know are safe and don't want to see every time.
+    /// </summary>
+    public static readonly string[] SafeNugetNamespaces =
+    [
+        "Microsoft.SourceLink.",
+        "DotNet.ReproducibleBuilds",
+        "DalamudPackager",
+        "System.Memory",
+        "System.Threading.",
+        "System.Buffers",
+        "System.Reactive",
+        "System.Text.Json",
+        "System.Text.Encodings",
+        "System.Drawing.Common",
+        "Newtonsoft.Json",
+        "JetBrains.Annotations",
+        "System.Runtime.CompilerServices.Unsafe",
+        "Microsoft.Extensions."
+    ];
     
     /// <summary>
     /// Label for a new plugin.
@@ -54,4 +82,19 @@ public static class PlogonSystemDefine
     /// Label for large PRs.
     /// </summary>
     public const string PR_LABEL_SIZE_LARGE = "size-large";
+    
+    /// <summary>
+    /// PR label for a plugin pending code review.
+    /// </summary>
+    public const string PR_LABEL_PENDING_CODE_REVIEW = "pending-code-review";
+    
+    /// <summary>
+    /// PR label for a plugin pending rules compliance.
+    /// </summary>
+    public const string PR_LABEL_PENDING_RULES_COMPLIANCE = "pending-rules-compliance";
+    
+    /// <summary>
+    /// PR label for a plugin pending testing.
+    /// </summary>
+    public const string PR_LABEL_PENDING_TESTING = "pending-testing";
 }

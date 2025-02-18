@@ -95,7 +95,7 @@ public class GitHubApi
     /// </summary>
     /// <param name="prNum">The pull request number</param>
     /// <returns></returns>
-    public async Task<string> GetPullRequestDiff(string prNum)
+    public async Task<string> GetPullRequestDiff(int prNum)
     {
         using var client = new HttpClient();
         return await client.GetStringAsync($"https://github.com/{repoOwner}/{repoName}/pull/{prNum}.diff");
@@ -114,6 +114,32 @@ public class GitHubApi
             throw new Exception("Could not get PR");
 
         return pr.Body;
+    }
+    
+    /// <summary>
+    /// Get the username of the first approving reviewer of a PR.
+    /// </summary>
+    /// <param name="issueNumber"></param>
+    /// <returns></returns>
+    /// <exception cref="Exception"></exception>
+    public async Task<string> GetReviewer(int issueNumber)
+    {
+        var reviews = await this.ghClient.PullRequest.Review.GetAll(repoOwner, repoName, issueNumber);
+        if (reviews == null)
+            throw new Exception("Could not get reviews");
+
+        var firstApprovingReview = reviews.FirstOrDefault(r => r.State == PullRequestReviewState.Approved &&
+                                                               PlogonSystemDefine.PacMembers.Contains(r.User.Login));
+        if (firstApprovingReview != null)
+            return firstApprovingReview.User.Login;
+        
+        var comments = await this.ghClient.Issue.Comment.GetAllForIssue(repoOwner, repoName, issueNumber);
+        var firstApprovingComment = comments.FirstOrDefault(c => PlogonSystemDefine.PacMembers.Contains(c.User.Login) &&
+                                                                 c.Body.Equals("bleatbot, approve", StringComparison.OrdinalIgnoreCase));
+        if (firstApprovingComment != null)
+            return firstApprovingComment.User.Login;
+        
+        throw new Exception($"No approving reviews on PR {issueNumber}");
     }
 
     /// <summary>
@@ -185,7 +211,22 @@ public class GitHubApi
         /// <summary>
         /// "size-l"
         /// </summary>
-        SizeLarge = 1 << 7
+        SizeLarge = 1 << 7,
+        
+        /// <summary>
+        /// "pending-rules-compliance"
+        /// </summary>
+        PendingRulesCompliance = 1 << 8,
+        
+        /// <summary>
+        /// "pending-testing"
+        /// </summary>
+        PendingTesting = 1 << 9,
+        
+        /// <summary>
+        /// "pending-code-review"
+        /// </summary>
+        PendingCodeReview = 1 << 10,
     }
 
     /// <summary>
@@ -245,6 +286,21 @@ public class GitHubApi
             managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
         else
             managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
+        
+        if (label.HasFlag(PrLabel.PendingCodeReview))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_PENDING_CODE_REVIEW);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_PENDING_CODE_REVIEW);
+        
+        if (label.HasFlag(PrLabel.PendingRulesCompliance))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_PENDING_RULES_COMPLIANCE);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_PENDING_RULES_COMPLIANCE);
+        
+        if (label.HasFlag(PrLabel.PendingTesting))
+            managedLabels.Add(PlogonSystemDefine.PR_LABEL_PENDING_TESTING);
+        else
+            managedLabels.Remove(PlogonSystemDefine.PR_LABEL_PENDING_TESTING);
 
         await this.ghClient.Issue.Labels.ReplaceAllForIssue(repoOwner, repoName, issueNumber, managedLabels.ToArray());
     }

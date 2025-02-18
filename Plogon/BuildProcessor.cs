@@ -6,8 +6,7 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Json;
-using System.Text.Json.Serialization;
+using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -39,24 +38,11 @@ namespace Plogon;
 /// </summary>
 public class BuildProcessor
 {
-    private readonly DirectoryInfo repoFolder;
-    private readonly DirectoryInfo manifestFolder;
-    private readonly DirectoryInfo workFolder;
-    private readonly DirectoryInfo staticFolder;
-    private readonly DirectoryInfo artifactFolder;
-    private readonly byte[]? secretsPrivateKeyBytes;
-    private readonly string? secretsPrivateKeyPassword;
-    private readonly bool allowNonDefaultImages;
-
     private readonly DockerClient dockerClient;
-
-    private readonly IAmazonS3? s3Client;
-
+    
     private static readonly string[] DalamudInternalDll = new[]
     {
         "Dalamud.dll",
-        // "Lumina.dll",
-        // "Lumina.Excel.dll",
         "ImGui.NET.dll",
         "ImGuiScene.dll",
     };
@@ -65,10 +51,8 @@ public class BuildProcessor
     private ManifestStorage manifestStorage;
     private DalamudReleases dalamudReleases;
 
-    private bool needExtendedImage;
-
     private const string DOCKER_IMAGE = "mcr.microsoft.com/dotnet/sdk";
-    private const string DOCKER_TAG = "8.0";
+    private const string DOCKER_TAG = "8.0.404";
 
     // This field specifies which dependency package is to be fetched depending on the .net target framework.
     // The values to use in turn depend on the used SDK (see DOCKER_TAG) and what gets resolved at compile time.
@@ -98,14 +82,10 @@ public class BuildProcessor
     private readonly Dictionary<string, string[]> FORCE_PACKAGES = new()
     {
         { "Dalamud.NET.Sdk", new[]
-            // This should have all of the SDK packages we still support.
-            { "9.0.2", "10.0.0" }
+            // This should have all the SDK packages we still support.
+            { "11.0.0", "11.2.0" }
         },
     };
-
-    private const string EXTENDED_IMAGE_HASH = "fba5ce59717fba4371149b8ae39d222a29a7f402c10e0941c85a27e8d1bb6ce4";
-
-    private const string S3_BUCKET_NAME = "dalamud-plugin-archive";
     
     /// <summary>
     /// Parameters for build processor.
@@ -168,32 +148,45 @@ public class BuildProcessor
         public string? PrDiff { get; set; }
         
         /// <summary>
-        /// 
+        /// S3 client to use for artifact uploads.
         /// </summary>
-        public IAmazonS3? S3Client { get; set; }
+        public IAmazonS3? HistoryS3Client { get; set; }
+        
+        /// <summary>
+        /// S3 client used for ephemeral uploads, such as diffs.
+        /// </summary>
+        public IAmazonS3? InternalS3Client { get; set; }
+        
+        /// <summary>
+        /// URL to the hosted instance.
+        /// </summary>
+        public string? InternalS3WebUrl { get; set; }
+        
+        /// <summary>
+        /// Bucket name for storing history zips.
+        /// </summary>
+        public string? HistoryBucketName { get; set; }
+        
+        /// <summary>
+        /// Bucket name for storing diffs.
+        /// </summary>
+        public string? DiffsBucketName { get; set; }
     }
+
+    private readonly BuildProcessorSetup setup;
 
     /// <summary>
     /// Set up build processor
     /// </summary>
     public BuildProcessor(BuildProcessorSetup setup)
     {
-        this.repoFolder = setup.RepoFolder;
-        this.manifestFolder = setup.ManifestFolder;
-        this.workFolder = setup.WorkFolder;
-        this.staticFolder = setup.StaticFolder;
-        this.artifactFolder = setup.ArtifactFolder;
-        this.secretsPrivateKeyBytes = setup.SecretsPrivateKeyBytes;
-        this.secretsPrivateKeyPassword = setup.SecretsPrivateKeyPassword;
-        this.allowNonDefaultImages = setup.AllowNonDefaultImages;
+        this.setup = setup; 
 
-        this.pluginRepository = new PluginRepository(repoFolder);
-        this.manifestStorage = new ManifestStorage(manifestFolder, setup.PrDiff, true, setup.CutoffDate);
-        this.dalamudReleases = new DalamudReleases(setup.BuildOverridesFile, workFolder.CreateSubdirectory("dalamud_releases_work"));
+        this.pluginRepository = new PluginRepository(setup.RepoFolder);
+        this.manifestStorage = new ManifestStorage(setup.ManifestFolder, setup.PrDiff, true, setup.CutoffDate);
+        this.dalamudReleases = new DalamudReleases(setup.BuildOverridesFile, setup.WorkFolder.CreateSubdirectory("dalamud_releases_work"));
 
         this.dockerClient = new DockerClientConfiguration().CreateClient();
-
-        this.s3Client = setup.S3Client;
     }
 
     /// <summary>
@@ -202,44 +195,6 @@ public class BuildProcessor
     /// <returns>List of images</returns>
     public async Task<List<ImageInspectResponse>> SetupDockerImage()
     {
-        if (needExtendedImage)
-        {
-            using var client = new HttpClient();
-
-            var cacheFolder = new DirectoryInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".plogon_cache"));
-            if (!cacheFolder.Exists)
-                cacheFolder.Create();
-
-            var imageFile = new FileInfo(Path.Combine(cacheFolder.FullName, "extended-image.tar.bz2"));
-            Stream? loadStream = null;
-            if (imageFile.Exists)
-            {
-                loadStream = File.OpenRead(imageFile.FullName);
-                Log.Information("Opened extended image from cache: {Path}", imageFile.FullName);
-            }
-            else
-            {
-                var url = Environment.GetEnvironmentVariable("EXTENDED_IMAGE_LINK");
-                using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-                response.EnsureSuccessStatusCode();
-                await using var streamToReadFrom = await response.Content.ReadAsStreamAsync();
-
-                await using Stream streamToWriteTo = File.Open(imageFile.FullName, FileMode.Create);
-
-                await streamToReadFrom.CopyToAsync(streamToWriteTo);
-                streamToWriteTo.Close();
-
-                loadStream = File.OpenRead(imageFile.FullName);
-                Log.Information("Downloaded extended image to cache: {Path}", imageFile.FullName);
-            }
-
-            await this.dockerClient.Images.LoadImageAsync(new ImageLoadParameters(), loadStream,
-                new Progress<JSONMessage>(progress =>
-                {
-                    Log.Verbose("Docker image load ({Id}): {Status}", progress.ID, progress.Status);
-                }));
-        }
-
         await this.dockerClient.Images.CreateImageAsync(new ImagesCreateParameters
         {
             FromImage = DOCKER_IMAGE,
@@ -307,7 +262,7 @@ public class BuildProcessor
                 if (state != null && state.BuiltCommit == manifest.Value.Plugin.Commit && !continuous)
                     continue;
 
-                if (manifest.Value.Build?.Image != null && !allowNonDefaultImages)
+                if (manifest.Value.Build?.Image != null && !this.setup.AllowNonDefaultImages)
                     continue;
 
                 tasks.Add(new BuildTask
@@ -325,19 +280,19 @@ public class BuildProcessor
             }
         }
 
-        needExtendedImage = tasks.Any(x => x.Manifest?.Build?.Image == "extended");
-
         return tasks;
     }
 
-    async Task GetDependency(string name, NugetLockfile.Dependency dependency, DirectoryInfo pkgFolder, HttpClient client)
+    async Task<BuildResult.ReviewedNeed> GetDependency(string name, NugetLockfile.Dependency dependency, DirectoryInfo pkgFolder, HttpClient client)
     {
         var pkgName = name.ToLower();
         var fileName = $"{pkgName}.{dependency.Resolved}.nupkg";
         var depPath = Path.Combine(pkgFolder.FullName, fileName);
 
+        var need = GetNeedStatus(name, dependency.Resolved, State.Need.NeedType.NuGet);
+        
         if (File.Exists(depPath))
-            return;
+            return need;
 
         Log.Information("   => Getting {DepName}(v{Version})", name, dependency.Resolved);
         var url =
@@ -348,21 +303,25 @@ public class BuildProcessor
         // TODO: verify content hash
 
         await File.WriteAllBytesAsync(depPath, data);
+        return need;
     }
 
-    private async Task RestorePackages(DirectoryInfo pkgFolder, NugetLockfile lockFileData, HttpClient client)
+    private async Task RestorePackages(DirectoryInfo pkgFolder, NugetLockfile lockFileData, HttpClient client, HashSet<BuildResult.ReviewedNeed> reviewedNeeds)
     {
         foreach (var runtime in lockFileData.Runtimes)
         {
             Log.Information("Getting packages for runtime {Runtime}", runtime.Key);
 
-            await Task.WhenAll(runtime.Value
+            var resultNeeds = await Task.WhenAll(runtime.Value
                 .Where(x => x.Value.Type != NugetLockfile.Dependency.DependencyType.Project)
                 .Select(dependency => GetDependency(dependency.Key, dependency.Value, pkgFolder, client)).ToList());
+
+            foreach (var reviewedNeed in resultNeeds)
+                reviewedNeeds.Add(reviewedNeed);
         }
     }
 
-    private async Task RestoreAllPackages(BuildTask task, DirectoryInfo localWorkFolder, DirectoryInfo pkgFolder)
+    private async Task RestoreAllPackages(DirectoryInfo localWorkFolder, DirectoryInfo pkgFolder, HashSet<BuildResult.ReviewedNeed> reviewedNeeds)
     {
         var lockFiles = localWorkFolder.GetFiles("packages.lock.json", SearchOption.AllDirectories);
 
@@ -383,7 +342,7 @@ public class BuildProcessor
 
             runtimeDependencies.UnionWith(GetRuntimeDependencies(lockFileData));
 
-            await RestorePackages(pkgFolder, lockFileData, client);
+            await RestorePackages(pkgFolder, lockFileData, client, reviewedNeeds);
         }
 
         // fetch runtime packages
@@ -408,13 +367,13 @@ public class BuildProcessor
         }
     }
 
-    async Task GetNeeds(BuildTask task, DirectoryInfo needs)
+    private async Task GetNeeds(BuildTask task, DirectoryInfo needsDir, HashSet<BuildResult.ReviewedNeed> reviewedNeeds)
     {
         if (task.Manifest?.Build?.Needs == null || !task.Manifest.Build.Needs.Any())
             return;
 
         using var client = new HttpClient();
-
+        
         foreach (var need in task.Manifest!.Build!.Needs)
         {
             using var response = await client.GetAsync(need.Url, HttpCompletionOption.ResponseHeadersRead);
@@ -424,24 +383,28 @@ public class BuildProcessor
             if (need.Dest!.Contains(".."))
                 throw new Exception();
 
-            var fileToWriteTo = Path.Combine(needs.FullName, need.Dest!);
+            string hash;
+            
+            var fileToWriteTo = Path.Combine(needsDir.FullName, need.Dest!);
             {
                 await using Stream streamToWriteTo = File.Open(fileToWriteTo, FileMode.Create);
 
                 await streamToReadFrom.CopyToAsync(streamToWriteTo);
+            
+                streamToWriteTo.Seek(0, SeekOrigin.Begin);
+                var sha512 = SHA512.Create();
+                hash = BitConverter.ToString(sha512.ComputeHash(streamToWriteTo)).Replace("-", "").ToLower();
+                
                 streamToWriteTo.Close();
             }
+            
+            reviewedNeeds.Add(GetNeedStatus(need.Url, hash, State.Need.NeedType.File));
 
             Log.Information("Downloaded need {Url} to {Dest}", need.Url, need.Dest);
         }
+        
     }
 
-    private class HasteResponse
-    {
-        [JsonPropertyName("key")]
-        public string? Key { get; set; }
-    };
-    
     /// <summary>
     /// A set of diffs.
     /// </summary>
@@ -454,6 +417,42 @@ public class BuildProcessor
 
     private async Task<PluginDiffSet> GetPluginDiff(DirectoryInfo workDir, BuildTask task, IEnumerable<BuildTask> tasks, bool doSemantic)
     {
+        async Task<string?> UploadDiffToS3(string output, string type, string extension, string contentType)
+        {
+            // Limit diffs to ~0.5mb
+            const int maxDiffSize = (int)(0.5 * 1024 * 1024);
+            if (output.Length > maxDiffSize)
+            {
+                Log.Error($"Diff too large, ignoring: {output.Length} > {maxDiffSize}");
+                return null;
+            }
+            
+            if (this.setup.InternalS3Client == null)
+                throw new Exception("S3 client not set up");
+            
+            var key = $"{task.InternalName}-{task.Manifest.Plugin.Commit}-{type}.{extension}";
+            var request = new PutObjectRequest
+            {
+                BucketName = this.setup.DiffsBucketName,
+                Key = key,
+                ContentBody = output,
+                ContentType = contentType,
+                TagSet =
+                [
+                    new() { Key = "internalName", Value = task.InternalName },
+                    new() { Key = "channel", Value = task.Channel },
+                    new() { Key = "type", Value = type },
+                    new() { Key = "commit", Value = task.Manifest.Plugin.Commit },
+                ]
+            };
+
+            var res = await this.setup.InternalS3Client.PutObjectAsync(request);
+            if (res is not { HttpStatusCode: HttpStatusCode.OK })
+                throw new Exception($"Failed to upload diff to S3: {res?.HttpStatusCode}");
+            
+            return $"https://{this.setup.DiffsBucketName}.{this.setup.InternalS3WebUrl}/{key}";
+        }
+        
         var internalName = task.InternalName;
         var haveCommit = task.HaveCommit;
         var wantCommit = task.Manifest!.Plugin.Commit;
@@ -472,9 +471,7 @@ public class BuildProcessor
                 Log.Information("Overriding diff haveCommit with {Commit} from {Channel}", haveCommit, removeTask.Channel);
             }
         }
-
-        using var client = new HttpClient();
-
+        
         var url = host.AbsoluteUri.Replace(".git", string.Empty);
 
         string? hosterUrl = null;
@@ -516,12 +513,8 @@ public class BuildProcessor
 
             if (haveCommit == emptyTree)
                 return null;
-
-            var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
-            res.EnsureSuccessStatusCode();
-
-            var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
-            return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+            
+            return await UploadDiffToS3(diffOutput, "plain", "diff", "text/plain");
         }
         
         async Task<string?> MakeAndUploadSemantic()
@@ -550,12 +543,8 @@ public class BuildProcessor
 
             if (haveCommit == emptyTree)
                 return null;
-
-            var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(diffOutput));
-            res.EnsureSuccessStatusCode();
-
-            var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
-            return $"https://haste.soulja-boy-told.me/raw/{json!.Key}.html";
+            
+            return await UploadDiffToS3(diffOutput, "semantic", "html", "text/html");
         }
 
         var linesAdded = 0;
@@ -586,12 +575,12 @@ public class BuildProcessor
 
             if (match.Success)
             {
-                if (!match.Groups.TryGetValue("numInsertions", out var groupInsertions) || !int.TryParse(groupInsertions?.Value, out linesAdded))
+                if (!match.Groups.TryGetValue("numInsertions", out var groupInsertions) || !int.TryParse(groupInsertions.Value, out linesAdded))
                 {
                     Log.Error("Could not parse insertions");
                 }
 
-                if (!match.Groups.TryGetValue("numDeletions", out var groupDeletions) || !int.TryParse(groupDeletions?.Value, out linesRemoved))
+                if (!match.Groups.TryGetValue("numDeletions", out var groupDeletions) || !int.TryParse(groupDeletions.Value, out linesRemoved))
                 {
                     Log.Error("Could not parse deletions");
                 }
@@ -707,13 +696,15 @@ public class BuildProcessor
         /// <param name="diff">diff url</param>
         /// <param name="version">plugin version</param>
         /// <param name="task">processed task</param>
-        public BuildResult(bool success, PluginDiffSet? diff, string? version, BuildTask task)
+        /// <param name="needs">List of needs</param>
+        public BuildResult(bool success, PluginDiffSet? diff, string? version, BuildTask task, IEnumerable<ReviewedNeed> needs)
         {
             this.Success = success;
             this.Diff = diff;
             this.Version = version;
             this.PreviousVersion = task.HaveVersion;
             this.Task = task;
+            this.Needs = needs;
         }
 
         /// <summary>
@@ -740,8 +731,40 @@ public class BuildProcessor
         /// The task that was processed
         /// </summary>
         public BuildTask Task { get; private set; }
+        
+        /// <summary>
+        /// A need of this plugin.
+        /// </summary>
+        /// <param name="Name">The name of this need.</param>
+        /// <param name="ReviewedBy">Who reviewed this need. Null if nobody did.</param>
+        /// <param name="Version">The version of the need.</param>
+        /// <param name="OldVersion">The old version of the need, if it changed. Null if it didn't.</param>
+        /// <param name="DiffUrl">Link to diff, if available.</param>
+        /// <param name="Type">Type of the need</param>
+        public record ReviewedNeed(string Name, string? ReviewedBy, string Version, string? OldVersion, string? DiffUrl, State.Need.NeedType Type);
+        
+        /// <summary>
+        /// Needs of this plugin to be displayed to a reviewer.
+        /// </summary>
+        public IEnumerable<ReviewedNeed> Needs { get; set; }
     }
 
+    private class NeedComparer : IEqualityComparer<BuildResult.ReviewedNeed>
+    {
+        public bool Equals(BuildResult.ReviewedNeed? x, BuildResult.ReviewedNeed? y)
+        {
+            if (x is null || y is null)
+                return false;
+            
+            return x.Name == y.Name && x.Version == y.Version;
+        }
+
+        public int GetHashCode(BuildResult.ReviewedNeed obj)
+        {
+            return HashCode.Combine(obj.Name, obj.Version);
+        }
+    }
+    
     private class LegacyPluginManifest
     {
         [JsonProperty]
@@ -754,7 +777,7 @@ public class BuildProcessor
         public int? DalamudApiLevel { get; set; }
     }
 
-    static async Task RetryUntil(Func<Task> what, int maxTries = 10)
+    private static async Task RetryUntil(Func<Task> what, int maxTries = 10)
     {
         while (true)
         {
@@ -785,15 +808,15 @@ public class BuildProcessor
 
     private async Task<Dictionary<string, string>> DecryptSecrets(BuildTask task)
     {
-        if (this.secretsPrivateKeyBytes is null
-            || this.secretsPrivateKeyPassword is null
+        if (this.setup.SecretsPrivateKeyBytes is null
+            || this.setup.SecretsPrivateKeyPassword is null
             || task.Manifest!.Plugin.Secrets.Count == 0)
             return new Dictionary<string, string>();
 
         // Load keys
         EncryptionKeys encryptionKeys;
-        await using (Stream privateKeyStream = new MemoryStream(secretsPrivateKeyBytes))
-            encryptionKeys = new EncryptionKeys(privateKeyStream, secretsPrivateKeyPassword);
+        await using (Stream privateKeyStream = new MemoryStream(this.setup.SecretsPrivateKeyBytes))
+            encryptionKeys = new EncryptionKeys(privateKeyStream, this.setup.SecretsPrivateKeyPassword);
 
         var pgp = new PGP(encryptionKeys);
 
@@ -809,7 +832,7 @@ public class BuildProcessor
     private static void WriteNugetConfig(FileInfo output)
     {
         var nugetConfigText =
-            $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <packageSources>\n    <clear />\n    <add key=\"plogon\" value=\"/packages\" />\n  </packageSources>\n</configuration>";
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<configuration>\n  <packageSources>\n    <clear />\n    <add key=\"plogon\" value=\"/packages\" />\n  </packageSources>\n</configuration>";
         File.WriteAllText(output.FullName, nugetConfigText);
     }
 
@@ -817,14 +840,18 @@ public class BuildProcessor
     /// Check out and build a plugin from a task
     /// </summary>
     /// <param name="task">The task to build</param>
-    /// <param name="commit">Whether or not the plugin should be committed to the repo</param>
+    /// <param name="commit">Whether the plugin should be committed to the repo</param>
     /// <param name="changelog">The plugin changelog</param>
+    /// <param name="reviewer">Reviewer of this task</param>
     /// <param name="otherTasks">All other queued tasks</param>
     /// <returns>The result of the build</returns>
     /// <exception cref="Exception">Generic build system errors</exception>
     /// <exception cref="PluginCommitException">Error during repo commit, all no further work should be done</exception>
-    public async Task<BuildResult> ProcessTask(BuildTask task, bool commit, string? changelog, ISet<BuildTask> otherTasks)
+    public async Task<BuildResult> ProcessTask(BuildTask task, bool commit, string? changelog, string? reviewer, ISet<BuildTask> otherTasks)
     {
+        if (commit && string.IsNullOrWhiteSpace(reviewer))
+            throw new Exception("Reviewer must be set when committing");
+        
         if (task.Type == BuildTask.TaskType.Remove)
         {
             if (!commit)
@@ -835,7 +862,7 @@ public class BuildProcessor
             var repoOutputDir = this.pluginRepository.GetPluginOutputDirectory(task.Channel, task.InternalName);
             repoOutputDir.Delete(true);
 
-            return new BuildResult(true, null, null, task);
+            return new BuildResult(true, null, null, task, []);
         }
 
         if (task.Manifest == null)
@@ -847,15 +874,16 @@ public class BuildProcessor
         ParanoiaValidateTask(task);
 
         var taskFolderName = $"{task.InternalName}-{task.Manifest.Plugin.Commit}-{task.Channel}";
-        var taskRoot = this.workFolder.CreateSubdirectory(taskFolderName);
-        Log.Verbose("taskRoot: {TaskRoot}", taskRoot.FullName);
-        var work = taskRoot.CreateSubdirectory("work");
-        var archive = taskRoot.CreateSubdirectory("archive");
-        var output = taskRoot.CreateSubdirectory("output");
-        var packages = taskRoot.CreateSubdirectory("packages");
-        var needs = taskRoot.CreateSubdirectory("needs");
+        var taskRootDir = this.setup.WorkFolder.CreateSubdirectory(taskFolderName);
+        Log.Verbose("taskRoot: {TaskRoot}", taskRootDir.FullName);
+        var workDir = taskRootDir.CreateSubdirectory("work");
+        var archiveDir = taskRootDir.CreateSubdirectory("archive");
+        var outputDir = taskRootDir.CreateSubdirectory("output");
+        var packagesDir = taskRootDir.CreateSubdirectory("packages");
+        var externalNeedsDir = taskRootDir.CreateSubdirectory("needs");
 
-        Debug.Assert(staticFolder.Exists);
+        if (!this.setup.StaticFolder.Exists)
+            throw new Exception("Static folder does not exist");
 
         if (string.IsNullOrWhiteSpace(task.Manifest.Plugin.Repository))
             throw new Exception("No repository specified");
@@ -870,45 +898,54 @@ public class BuildProcessor
             throw new Exception("Not allowed");
         
         // Always clone fresh
-        if (work.Exists)
+        if (workDir.Exists)
         {
-            work.Delete(true);
-            work.Create();
+            workDir.Delete(true);
+            workDir.Create();
         }
 
-        Repository.Clone(task.Manifest.Plugin.Repository, work.FullName, new CloneOptions
+        Repository.Clone(task.Manifest.Plugin.Repository, workDir.FullName, new CloneOptions
         {
             Checkout = false,
             RecurseSubmodules = false,
+            FetchOptions =
+            {
+                //Depth = 1,
+            }
         });
 
-        var repo = new Repository(work.FullName);
+        var repo = new Repository(workDir.FullName);
         Commands.Fetch(repo, "origin", new [] { task.Manifest.Plugin.Commit }, new FetchOptions
         {
+            //Depth = 1,
         }, null);
         repo.Reset(ResetMode.Hard, task.Manifest.Plugin.Commit);
-        HandleSubmodules(repo);
+        
+        HashSet<BuildResult.ReviewedNeed> allNeeds = new(new NeedComparer());
+        FetchSubmodules(repo, allNeeds);
 
-        if (!await CheckIfTrueCommit(work, task.Manifest.Plugin.Commit))
+        if (!await CheckIfTrueCommit(workDir, task.Manifest.Plugin.Commit))
             throw new Exception("Commit in manifest is not a true commit, please don't specify tags");
 
         // Archive source code before build
-        CopySourceForArchive(work, archive);
+        CopySourceForArchive(workDir, archiveDir);
         
         // Create archive zip
         var archiveZipFile =
-            new FileInfo(Path.Combine(this.workFolder.FullName, $"{taskFolderName}-{archive.Name}.zip"));
-        ZipFile.CreateFromDirectory(archive.FullName, archiveZipFile.FullName);
+            new FileInfo(Path.Combine(this.setup.WorkFolder.FullName, $"{taskFolderName}-{archiveDir.Name}.zip"));
+        ZipFile.CreateFromDirectory(archiveDir.FullName, archiveZipFile.FullName);
         
-        var diff = await GetPluginDiff(work, task, otherTasks, !commit);
+        var diff = await GetPluginDiff(workDir, task, otherTasks, !commit);
 
         var dalamudAssemblyDir = await this.dalamudReleases.GetDalamudAssemblyDirAsync(task.Channel);
 
-        WriteNugetConfig(new FileInfo(Path.Combine(work.FullName, "nuget.config")));
+        WriteNugetConfig(new FileInfo(Path.Combine(workDir.FullName, "nuget.config")));
         
-        await RetryUntil(async () => await GetNeeds(task, needs));
-        await RetryUntil(async () => await RestoreAllPackages(task, work, packages));
-        var needsExtendedImage = task.Manifest?.Build?.Image == "extended";
+        await RetryUntil(async () => await GetNeeds(task, externalNeedsDir, allNeeds));
+        await RetryUntil(async () => await RestoreAllPackages(workDir, packagesDir, allNeeds));
+
+        if (!string.IsNullOrEmpty(task.Manifest?.Build?.Image))
+            throw new Exception("Non-default build images are currently not supported, please reach out if you need this");
 
         var dockerEnv = new List<string>
         {
@@ -939,7 +976,7 @@ public class BuildProcessor
         var containerCreateResponse = await this.dockerClient.Containers.CreateContainerAsync(
             new CreateContainerParameters
             {
-                Image = needsExtendedImage ? EXTENDED_IMAGE_HASH : $"{DOCKER_IMAGE}:{DOCKER_TAG}",
+                Image = $"{DOCKER_IMAGE}:{DOCKER_TAG}",
 
                 NetworkDisabled = true,
 
@@ -952,12 +989,12 @@ public class BuildProcessor
                     AutoRemove = false,
                     Binds = new List<string>
                     {
-                        $"{work.FullName}:/work/repo",
+                        $"{workDir.FullName}:/work/repo",
                         $"{dalamudAssemblyDir.FullName}:/work/dalamud:ro",
-                        $"{staticFolder.FullName}:/static:ro",
-                        $"{output.FullName}:/output",
-                        $"{packages.FullName}:/packages:ro",
-                        $"{needs.FullName}:/needs:ro"
+                        $"{this.setup.StaticFolder.FullName}:/static:ro",
+                        $"{outputDir.FullName}:/output",
+                        $"{packagesDir.FullName}:/packages:ro",
+                        $"{externalNeedsDir.FullName}:/needs:ro"
                     }
                 },
                 Env = dockerEnv,
@@ -999,7 +1036,7 @@ public class BuildProcessor
                 eof = result.EOF;
 
                 var log = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
-                Log.Information(log.Replace("\n", string.Empty));
+                Log.Information("[CONTAINER] {Log}", log.Replace("\n", string.Empty));
             }
         }
 
@@ -1021,7 +1058,7 @@ public class BuildProcessor
                 Force = true,
             });
 
-        var outputFiles = output.GetFiles("*.dll", SearchOption.AllDirectories);
+        var outputFiles = outputDir.GetFiles("*.dll", SearchOption.AllDirectories);
         foreach (var outputFile in outputFiles)
         {
             if (DalamudInternalDll.Any(x => x == outputFile.Name))
@@ -1030,12 +1067,12 @@ public class BuildProcessor
             }
         }
 
-        var dpOutput = new DirectoryInfo(Path.Combine(output.FullName, task.InternalName));
+        var dpOutput = new DirectoryInfo(Path.Combine(outputDir.FullName, task.InternalName));
         string? version = null;
 
         if (dpOutput.Exists)
         {
-            var artifact = this.artifactFolder.CreateSubdirectory($"{task.InternalName}-{task.Manifest.Plugin.Commit}");
+            var artifact = this.setup.ArtifactFolder.CreateSubdirectory($"{task.InternalName}-{task.Manifest.Plugin.Commit}");
             try
             {
                 foreach (var file in dpOutput.GetFiles())
@@ -1085,9 +1122,13 @@ public class BuildProcessor
                         task.Channel,
                         task.InternalName,
                         task.Manifest.Plugin.Commit,
-                        version!,
+                        version ?? throw new Exception("Committing, but version is null"),
                         task.Manifest.Plugin.MinimumVersion,
-                        changelog);
+                        changelog,
+                        reviewer!,
+                        allNeeds.Select(x => (x.Name, x.Version)));
+                    
+                    this.CommitReviewedNeeds(allNeeds, reviewer!);
 
                     var repoOutputDir = this.pluginRepository.GetPluginOutputDirectory(task.Channel, task.InternalName);
 
@@ -1096,7 +1137,7 @@ public class BuildProcessor
                         file.CopyTo(Path.Combine(repoOutputDir.FullName, file.Name), true);
                     }
 
-                    if (this.s3Client != null)
+                    if (this.setup.HistoryS3Client != null)
                     {
                         var key =
                             $"sources/{task.InternalName}/{task.Manifest.Plugin.Commit}.zip";
@@ -1105,7 +1146,7 @@ public class BuildProcessor
                         bool mustUpload;
                         try
                         {
-                            await this.s3Client.GetObjectMetadataAsync(S3_BUCKET_NAME, key);
+                            await this.setup.HistoryS3Client.GetObjectMetadataAsync(this.setup.HistoryBucketName, key);
                             mustUpload = false;
                         }
                         catch (AmazonS3Exception exception)
@@ -1122,9 +1163,9 @@ public class BuildProcessor
 
                         if (mustUpload)
                         {
-                            var result = await this.s3Client.PutObjectAsync(new PutObjectRequest
+                            var result = await this.setup.HistoryS3Client.PutObjectAsync(new PutObjectRequest
                             {
-                                BucketName = S3_BUCKET_NAME,
+                                BucketName = this.setup.HistoryBucketName,
                                 Key = key,
                                 FilePath = archiveZipFile.FullName,
                                 TagSet =
@@ -1203,7 +1244,7 @@ public class BuildProcessor
         try
         {
             // Cleanup work folder to save storage space on actions
-            work.Delete(true);
+            workDir.Delete(true);
             archiveZipFile.Delete();
         }
         catch (Exception ex)
@@ -1211,7 +1252,62 @@ public class BuildProcessor
             Log.Error(ex, "Could not cleanup workspace");
         }
         
-        return new BuildResult(exitCode == 0, diff, version, task);
+        return new BuildResult(exitCode == 0, diff, version, task, allNeeds);
+    }
+
+    private BuildResult.ReviewedNeed GetNeedStatus(string key, string version, State.Need.NeedType type)
+    {
+        var existingReview = this.pluginRepository.State.ReviewedNeeds
+                                 .FirstOrDefault(x => string.Equals(x.Key, key, StringComparison.Ordinal) &&
+                                                      string.Equals(x.Version, version, StringComparison.Ordinal));
+
+        if (existingReview == null)
+        {
+            var lastReview = this.pluginRepository.State.ReviewedNeeds
+                                 .Where(x => string.Equals(x.Key, key, StringComparison.Ordinal))
+                                 .OrderByDescending(x => x.ReviewedAt)
+                                 .FirstOrDefault();
+
+            string? diffUrl = null;
+            if (type == State.Need.NeedType.Submodule && lastReview != null)
+            {
+                if (Uri.TryCreate(key, UriKind.Absolute, out var uri) && uri.Host == "github.com")
+                {
+                    var parts = uri.AbsolutePath.Split('/');
+                    if (parts.Length >= 3)
+                    {
+                        var diffHost = uri.Host;
+                        if (diffHost.EndsWith(".git"))
+                            diffHost = diffHost[..^4];
+                        
+                        diffUrl =
+                            $"https://{diffHost}/{parts[1]}/{parts[2]}/compare/{lastReview.Version}...{version}";
+                    }
+                }
+            }
+            
+            return new(key, null, version, lastReview?.Version, diffUrl, type);
+        }
+        
+        return new(key, existingReview.ReviewedBy, version, existingReview.Version, null, type);
+    }
+    
+    private void CommitReviewedNeeds(IEnumerable<BuildResult.ReviewedNeed> needs, string reviewer)
+    {
+        var newNeeds = needs
+                       .Where(need => need.ReviewedBy == null)
+                       .Select(
+                           need => new State.Need
+                           {
+                               Key = need.Name,
+                               ReviewedBy = reviewer,
+                               Version = need.Version,
+                               ReviewedAt = DateTime.UtcNow,
+                               Type = need.Type,
+                           }).ToList();
+        
+        Log.Information("Adding {Count} newly reviewed needs to repo state", newNeeds.Count);
+        this.pluginRepository.AddReviewedNeeds(newNeeds);
     }
     
     private static void CopySourceForArchive(DirectoryInfo from, DirectoryInfo to, int depth = 0)
@@ -1233,19 +1329,25 @@ public class BuildProcessor
             CopySourceForArchive(dir, to.CreateSubdirectory(dir.Name), depth + 1);
         }
     }
-
-    private static void HandleSubmodules(Repository repo)
+    
+    private void FetchSubmodules(Repository repo, HashSet<BuildResult.ReviewedNeed> reviewedNeeds)
     {
         foreach (var submodule in repo.Submodules)
         {
             repo.Submodules.Update(submodule.Name, new SubmoduleUpdateOptions
             {
                 Init = true,
+                FetchOptions =
+                {
+                    //Depth = 1,
+                }
             });
+            
+            reviewedNeeds.Add(GetNeedStatus(submodule.Url, submodule.WorkDirCommitId.Sha, State.Need.NeedType.Submodule));
 
             // In the case of recursive submodules
             var submoduleRepo = new Repository(Path.Combine(repo.Info.WorkingDirectory, submodule.Path));
-            HandleSubmodules(submoduleRepo);
+            FetchSubmodules(submoduleRepo, reviewedNeeds);
         }
     }
 
