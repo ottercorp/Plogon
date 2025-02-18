@@ -6,7 +6,9 @@ using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -405,6 +407,12 @@ public class BuildProcessor
         
     }
 
+    private class HasteResponse
+    {
+        [JsonPropertyName("key")]
+        public string? Key { get; set; }
+    };
+
     /// <summary>
     /// A set of diffs.
     /// </summary>
@@ -419,38 +427,48 @@ public class BuildProcessor
     {
         async Task<string?> UploadDiffToS3(string output, string type, string extension, string contentType)
         {
-            // Limit diffs to ~0.5mb
-            const int maxDiffSize = (int)(0.5 * 1024 * 1024);
-            if (output.Length > maxDiffSize)
-            {
-                Log.Error($"Diff too large, ignoring: {output.Length} > {maxDiffSize}");
-                return null;
-            }
-            
-            if (this.setup.InternalS3Client == null)
-                throw new Exception("S3 client not set up");
-            
-            var key = $"{task.InternalName}-{task.Manifest.Plugin.Commit}-{type}.{extension}";
-            var request = new PutObjectRequest
-            {
-                BucketName = this.setup.DiffsBucketName,
-                Key = key,
-                ContentBody = output,
-                ContentType = contentType,
-                TagSet =
-                [
-                    new() { Key = "internalName", Value = task.InternalName },
-                    new() { Key = "channel", Value = task.Channel },
-                    new() { Key = "type", Value = type },
-                    new() { Key = "commit", Value = task.Manifest.Plugin.Commit },
-                ]
-            };
+            using var client = new HttpClient();
+            var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(output));
+            res.EnsureSuccessStatusCode();
 
-            var res = await this.setup.InternalS3Client.PutObjectAsync(request);
-            if (res is not { HttpStatusCode: HttpStatusCode.OK })
-                throw new Exception($"Failed to upload diff to S3: {res?.HttpStatusCode}");
-            
-            return $"https://{this.setup.DiffsBucketName}.{this.setup.InternalS3WebUrl}/{key}";
+            var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
+            return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+
+
+
+
+            // // Limit diffs to ~0.5mb
+            // const int maxDiffSize = (int)(0.5 * 1024 * 1024);
+            // if (output.Length > maxDiffSize)
+            // {
+            //     Log.Error($"Diff too large, ignoring: {output.Length} > {maxDiffSize}");
+            //     return null;
+            // }
+            //
+            // if (this.setup.InternalS3Client == null)
+            //     throw new Exception("S3 client not set up");
+            //
+            // var key = $"{task.InternalName}-{task.Manifest.Plugin.Commit}-{type}.{extension}";
+            // var request = new PutObjectRequest
+            // {
+            //     BucketName = this.setup.DiffsBucketName,
+            //     Key = key,
+            //     ContentBody = output,
+            //     ContentType = contentType,
+            //     TagSet =
+            //     [
+            //         new() { Key = "internalName", Value = task.InternalName },
+            //         new() { Key = "channel", Value = task.Channel },
+            //         new() { Key = "type", Value = type },
+            //         new() { Key = "commit", Value = task.Manifest.Plugin.Commit },
+            //     ]
+            // };
+            //
+            // var res = await this.setup.InternalS3Client.PutObjectAsync(request);
+            // if (res is not { HttpStatusCode: HttpStatusCode.OK })
+            //     throw new Exception($"Failed to upload diff to S3: {res?.HttpStatusCode}");
+            //
+            // return $"https://{this.setup.DiffsBucketName}.{this.setup.InternalS3WebUrl}/{key}";
         }
         
         var internalName = task.InternalName;
