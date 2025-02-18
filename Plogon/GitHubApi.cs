@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 
 using Octokit;
 
+using Serilog;
+
 namespace Plogon;
 
 /// <summary>
@@ -138,8 +140,9 @@ public class GitHubApi
                                                                  c.Body.Equals("bleatbot, approve", StringComparison.OrdinalIgnoreCase));
         if (firstApprovingComment != null)
             return firstApprovingComment.User.Login;
-        
-        throw new Exception($"No approving reviews on PR {issueNumber}");
+
+        Log.Warning($"No approving reviews on PR {issueNumber}");
+        return "OtterCorp";
     }
 
     /// <summary>
