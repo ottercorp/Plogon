@@ -427,48 +427,48 @@ public class BuildProcessor
     {
         async Task<string?> UploadDiffToS3(string output, string type, string extension, string contentType)
         {
-            using var client = new HttpClient();
-            var res = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(output));
-            res.EnsureSuccessStatusCode();
+            if (string.IsNullOrEmpty(this.setup.InternalS3WebUrl))
+            {
+                using var client = new HttpClient();
+                var result = await client.PostAsync("https://haste.soulja-boy-told.me/documents", new StringContent(output));
+                result.EnsureSuccessStatusCode();
 
-            var json = await res.Content.ReadFromJsonAsync<HasteResponse>();
-            return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+                var json = await result.Content.ReadFromJsonAsync<HasteResponse>();
+                return $"https://haste.soulja-boy-told.me/{json!.Key}.diff";
+            }
 
+            // Limit diffs to ~0.5mb
+            const int maxDiffSize = (int)(0.5 * 1024 * 1024);
+            if (output.Length > maxDiffSize)
+            {
+                Log.Error($"Diff too large, ignoring: {output.Length} > {maxDiffSize}");
+                return null;
+            }
 
+            if (this.setup.InternalS3Client == null)
+                throw new Exception("S3 client not set up");
 
+            var key = $"{task.InternalName}-{task.Manifest.Plugin.Commit}-{type}.{extension}";
+            var request = new PutObjectRequest
+            {
+                BucketName = this.setup.DiffsBucketName,
+                Key = key,
+                ContentBody = output,
+                ContentType = contentType,
+                TagSet =
+                [
+                    new() { Key = "internalName", Value = task.InternalName },
+                    new() { Key = "channel", Value = task.Channel },
+                    new() { Key = "type", Value = type },
+                    new() { Key = "commit", Value = task.Manifest.Plugin.Commit },
+                ]
+            };
 
-            // // Limit diffs to ~0.5mb
-            // const int maxDiffSize = (int)(0.5 * 1024 * 1024);
-            // if (output.Length > maxDiffSize)
-            // {
-            //     Log.Error($"Diff too large, ignoring: {output.Length} > {maxDiffSize}");
-            //     return null;
-            // }
-            //
-            // if (this.setup.InternalS3Client == null)
-            //     throw new Exception("S3 client not set up");
-            //
-            // var key = $"{task.InternalName}-{task.Manifest.Plugin.Commit}-{type}.{extension}";
-            // var request = new PutObjectRequest
-            // {
-            //     BucketName = this.setup.DiffsBucketName,
-            //     Key = key,
-            //     ContentBody = output,
-            //     ContentType = contentType,
-            //     TagSet =
-            //     [
-            //         new() { Key = "internalName", Value = task.InternalName },
-            //         new() { Key = "channel", Value = task.Channel },
-            //         new() { Key = "type", Value = type },
-            //         new() { Key = "commit", Value = task.Manifest.Plugin.Commit },
-            //     ]
-            // };
-            //
-            // var res = await this.setup.InternalS3Client.PutObjectAsync(request);
-            // if (res is not { HttpStatusCode: HttpStatusCode.OK })
-            //     throw new Exception($"Failed to upload diff to S3: {res?.HttpStatusCode}");
-            //
-            // return $"https://{this.setup.DiffsBucketName}.{this.setup.InternalS3WebUrl}/{key}";
+            var res = await this.setup.InternalS3Client.PutObjectAsync(request);
+            if (res is not { HttpStatusCode: HttpStatusCode.OK })
+                throw new Exception($"Failed to upload diff to S3: {res?.HttpStatusCode}");
+
+            return $"https://{this.setup.DiffsBucketName}.{this.setup.InternalS3WebUrl}/{key}";
         }
         
         var internalName = task.InternalName;

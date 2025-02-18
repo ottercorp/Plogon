@@ -105,7 +105,7 @@ public class WebServices
             Log.Warning("PR: {Text}", text + " " + e);
         }
 
-        return int.Parse(text);
+        return int.Parse(text.Trim('"'));
     }
 
     public class StagedPluginInfo
