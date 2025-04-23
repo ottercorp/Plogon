@@ -93,6 +93,7 @@ class Program
             {
                 ServiceURL = internalS3ApiUrl,
                 AuthenticationRegion = internalS3Region,
+                ForcePathStyle = true,
             });
             Log.Verbose("Internal S3 client OK for {ApiUrl}", internalS3ApiUrl);
         }
