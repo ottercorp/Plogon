@@ -66,6 +66,8 @@ class Program
 
         if (mode == ModeOfOperation.Unknown)
             throw new Exception("No mode of operation specified.");
+
+        var internalS3ApiUrl = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_APIURL");
         
         var s3AccessKey = Environment.GetEnvironmentVariable("PLOGON_S3_ACCESSKEY");
         var s3Secret = Environment.GetEnvironmentVariable("PLOGON_S3_SECRET");
@@ -75,11 +77,16 @@ class Program
         if (s3AccessKey != null && s3Secret != null && s3Region != null)
         {
             var s3Creds = new Amazon.Runtime.BasicAWSCredentials(s3AccessKey, s3Secret);
-            historyStorageS3Client = new AmazonS3Client(s3Creds, Amazon.RegionEndpoint.GetBySystemName(s3Region));
+            historyStorageS3Client = new AmazonS3Client(s3Creds, new AmazonS3Config()
+            {
+                ServiceURL = internalS3ApiUrl,
+                AuthenticationRegion = s3Region,
+                ForcePathStyle = true,
+            });
             Log.Verbose("History S3 client OK for {Region}", s3Region);
         }
         
-        var internalS3ApiUrl = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_APIURL");
+        //var internalS3ApiUrl = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_APIURL");
         var internalS3Region = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_REGION");
         var internalS3AccessKey = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_ACCESSKEY");
         var internalS3Secret = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_SECRET");
