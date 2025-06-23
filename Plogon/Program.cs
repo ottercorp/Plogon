@@ -168,7 +168,7 @@ class Program
         var allResults = new List<BuildProcessor.BuildResult>();
 
         WebServices.Stats? stats = null;
-        if (mode == ModeOfOperation.PullRequest)
+        if (mode == ModeOfOperation.PullRequest && false)
             stats = await webservices.GetStats();
 
         try
