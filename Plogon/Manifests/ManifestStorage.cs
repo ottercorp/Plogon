@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 using Serilog;
 
@@ -14,39 +14,83 @@ namespace Plogon.Manifests;
 
 public class ManifestStorage
 {
-    private readonly DirectoryInfo baseDirectory;
     private readonly DateTime? cutoffDate;
-    private readonly ISet<string>? affectedManifests;
 
-    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, Manifest>> Channels;
-
-    public ManifestStorage(DirectoryInfo baseDirectory, string? prDiff, bool ignoreNonAffected, DateTime? cutoffDate)
+    public ManifestStorage(DirectoryInfo baseDirectory, DateTime? cutoffDate = null)
     {
-        this.baseDirectory = baseDirectory;
+        this.BaseDirectory = baseDirectory;
         this.cutoffDate = cutoffDate;
-
-        if (prDiff is not null)
-        {
-            this.affectedManifests = GetAffectedManifestsFromDiff(prDiff);
-        }
 
         var channels = new Dictionary<string, IReadOnlyDictionary<string, Manifest>>();
 
-        var stableDir = new DirectoryInfo(Path.Combine(this.baseDirectory.FullName, "stable"));
-        var testingDir = new DirectoryInfo(Path.Combine(this.baseDirectory.FullName, "testing"));
+        var stableDir = new DirectoryInfo(Path.Combine(this.BaseDirectory.FullName, "stable"));
+        var testingDir = new DirectoryInfo(Path.Combine(this.BaseDirectory.FullName, "testing"));
 
-        channels.Add(stableDir.Name, GetManifestsInDirectory(stableDir, ignoreNonAffected));
+        var stableManifests = GetManifestsInDirectory(stableDir);
+        foreach (var manifest in stableManifests)
+        {
+            manifest.Value.PathInRepo = $"{stableDir.Name}/{manifest.Key}/manifest.toml";
+        }
+        
+        channels.Add(stableDir.Name, stableManifests);
 
         foreach (var testingChannelDir in testingDir.EnumerateDirectories())
         {
-            var manifests = GetManifestsInDirectory(testingChannelDir, ignoreNonAffected);
+            var manifests = GetManifestsInDirectory(testingChannelDir);
+            foreach (var manifest in manifests)
+            {
+                manifest.Value.PathInRepo = $"{testingDir.Name}/{testingChannelDir.Name}/{manifest.Key}/manifest.toml";
+            }
+            
             channels.Add($"testing-{testingChannelDir.Name}", manifests);
         }
 
         this.Channels = channels;
     }
+    
+    public DirectoryInfo BaseDirectory { get; }
 
-    private Dictionary<string, Manifest> GetManifestsInDirectory(DirectoryInfo directory, bool ignoreNonAffected)
+    public IReadOnlyDictionary<string, IReadOnlyDictionary<string, Manifest>> Channels { get; private set; }
+    
+    /// <summary>
+    /// Get the manifest for a specific channel and internal name.
+    /// If the manifest was deleted, get the last known manifest.
+    /// </summary>
+    /// <param name="channel">Name of the channel to get the manifest from.</param>
+    /// <param name="internalName">Internal name of the plugin to look for.</param>
+    /// <returns>The parsed historical manifest.</returns>
+    /// <exception cref="Exception">If the manifest could not be found or parsed</exception>
+    public async Task<Manifest?> GetHistoricManifestAsync(string channel, string internalName)
+    {
+        var formattedManifestPath = $"{PlogonSystemDefine.ChannelIdToPath(channel)}/{internalName}/manifest.toml";
+
+        var revListHelper = await GitHelper.ExecuteAsync(this.BaseDirectory, $"rev-list -n 1 HEAD -- \"{formattedManifestPath}\"");
+        if (string.IsNullOrWhiteSpace(revListHelper.StandardOutput))
+            throw new Exception("Historic manifest rev not found");
+        
+        var commit = revListHelper.StandardOutput.Trim();
+        try
+        {
+            await GitHelper.ExecuteAsync(this.BaseDirectory, 
+                                         $"rev-parse --quiet --verify \"{commit}:{formattedManifestPath}\" ");
+        }
+        catch (GitHelper.GitCommandException ex)
+        {
+            // 1 means the file was deleted, so we need the parent commit
+            if (ex.ExitCode != 1)
+                throw;
+            
+            commit += "^";
+        }
+        
+        var manifestHelper = await GitHelper.ExecuteAsync(this.BaseDirectory, $"show \"{commit}:{formattedManifestPath}\"");
+        var manifest = Toml.ToModel<Manifest>(manifestHelper.StandardOutput ?? throw new Exception("Could not get historic manifest content"));
+        manifest.PathInRepo = formattedManifestPath;
+
+        return manifest;
+    }
+
+    private Dictionary<string, Manifest> GetManifestsInDirectory(DirectoryInfo directory)
     {
         var manifests = new Dictionary<string, Manifest>();
 
@@ -55,8 +99,6 @@ public class ManifestStorage
             try
             {
                 var tomlFile = manifestDir.GetFiles("*.toml").First();
-                if (affectedManifests is not null && !affectedManifests.Contains(tomlFile.FullName) && ignoreNonAffected)
-                    continue;
 
                 if (cutoffDate != null)
                 {
@@ -64,7 +106,7 @@ public class ManifestStorage
                         $"log -n 1 --pretty=format:%cd --date=iso-strict \"{tomlFile.FullName}\"")
                     {
                         RedirectStandardOutput = true,
-                        WorkingDirectory = this.baseDirectory.FullName,
+                        WorkingDirectory = this.BaseDirectory.FullName,
                     };
 
                     var process = Process.Start(psi);
@@ -88,8 +130,8 @@ public class ManifestStorage
 
                 var tomlText = tomlFile.OpenText().ReadToEnd();
                 var manifest = Toml.ToModel<Manifest>(tomlText);
-
-                manifest.Directory = manifestDir;
+                
+                manifest.File = tomlFile;
                 manifests.Add(manifestDir.Name, manifest);
             }
             catch (Exception ex)
@@ -99,18 +141,5 @@ public class ManifestStorage
         }
 
         return manifests;
-    }
-
-    private ISet<string> GetAffectedManifestsFromDiff(string prDiff)
-    {
-        var manifestFiles = new HashSet<string>();
-
-        var rx = new Regex(@"((?:\+\+\+\s+b\/)|(?:rename to\s+))(.*\.toml)", RegexOptions.IgnoreCase);
-        foreach (Match match in rx.Matches(prDiff))
-        {
-            manifestFiles.Add(new FileInfo(Path.Combine(this.baseDirectory.FullName, match.Groups[2].Value)).FullName);
-        }
-
-        return manifestFiles;
     }
 }

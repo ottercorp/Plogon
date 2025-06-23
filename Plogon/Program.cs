@@ -52,6 +52,7 @@ class Program
     /// </summary>
     /// <param name="outputFolder">The folder used for storing output and state.</param>
     /// <param name="manifestFolder">The folder used for storing plugin manifests.</param>
+    /// <param name="masterManifestFolder">When running for a PR, directory containing the current, unmodified manifests.</param>
     /// <param name="workFolder">The folder to store temporary files and build output in.</param>
     /// <param name="staticFolder">The 'static' folder that holds script files.</param>
     /// <param name="artifactFolder">The folder to store artifacts in.</param>
@@ -59,8 +60,17 @@ class Program
     /// <param name="buildOverridesFile">Path to file containing build overrides.</param>
     /// <param name="ci">Running in CI.</param>
     /// <param name="buildAll">Ignore actor checks.</param>
-    static async Task Main(DirectoryInfo outputFolder, DirectoryInfo manifestFolder, DirectoryInfo workFolder,
-        DirectoryInfo staticFolder, DirectoryInfo artifactFolder, ModeOfOperation mode, FileInfo? buildOverridesFile = null, bool ci = false, bool buildAll = false)
+    static async Task Main(
+        DirectoryInfo outputFolder,
+        DirectoryInfo manifestFolder,
+        DirectoryInfo masterManifestFolder,
+        DirectoryInfo workFolder,
+        DirectoryInfo staticFolder,
+        DirectoryInfo artifactFolder,
+        ModeOfOperation mode,
+        FileInfo? buildOverridesFile = null,
+        bool ci = false,
+        bool buildAll = false)
     {
         SetupLogging();
 
@@ -72,7 +82,7 @@ class Program
         var s3AccessKey = Environment.GetEnvironmentVariable("PLOGON_S3_ACCESSKEY");
         var s3Secret = Environment.GetEnvironmentVariable("PLOGON_S3_SECRET");
         var s3Region = Environment.GetEnvironmentVariable("PLOGON_S3_REGION");
-        
+
         IAmazonS3? historyStorageS3Client = null;
         if (s3AccessKey != null && s3Secret != null && s3Region != null)
         {
@@ -91,7 +101,7 @@ class Program
         var internalS3AccessKey = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_ACCESSKEY");
         var internalS3Secret = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_SECRET");
         var internalS3WebUrl = Environment.GetEnvironmentVariable("PLOGON_INTERNAL_S3_WEBURL");
-        
+
         IAmazonS3? internalS3Client = null;
         if (internalS3AccessKey != null && internalS3Secret != null && internalS3ApiUrl != null && internalS3Region != null)
         {
@@ -104,7 +114,7 @@ class Program
             });
             Log.Verbose("Internal S3 client OK for {ApiUrl}", internalS3ApiUrl);
         }
-        
+
         var publicChannelWebhook = new DiscordWebhook(Environment.GetEnvironmentVariable("DISCORD_WEBHOOK"));
         //var pacChannelWebhook = new DiscordWebhook(Environment.GetEnvironmentVariable("PAC_DISCORD_WEBHOOK"));
         var webservices = new WebServices();
@@ -116,7 +126,7 @@ class Program
         var repoParts = Environment.GetEnvironmentVariable("GITHUB_REPOSITORY")?.Split("/");
         var repoOwner = repoParts?[0];
         var repoName = repoParts?[1];
-        
+
         var prNumberStr = Environment.GetEnvironmentVariable("GITHUB_PR_NUM");
         int? prNumber = mode switch
         {
@@ -138,7 +148,7 @@ class Program
 
             if (string.IsNullOrEmpty(repoName))
                 throw new Exception("repoName null or empty");
-            
+
             if (githubActor == null && mode == ModeOfOperation.PullRequest)
                 throw new Exception("GITHUB_ACTOR not set");
 
@@ -175,35 +185,30 @@ class Program
 
             var setup = new BuildProcessor.BuildProcessorSetup
             {
-                RepoFolder = outputFolder,
-                ManifestFolder = manifestFolder,
-                WorkFolder = workFolder,
-                StaticFolder = staticFolder,
-                ArtifactFolder = artifactFolder,
+                RepoDirectory = outputFolder,
+                WorkingManifestDirectory = manifestFolder,
+                MasterManifestDirectory = masterManifestFolder,
+                WorkDirectory = workFolder,
+                StaticDirectory = staticFolder,
+                ArtifactDirectory = artifactFolder,
                 BuildOverridesFile = buildOverridesFile,
                 SecretsPrivateKeyBytes = secretsPkBytes,
                 SecretsPrivateKeyPassword = secretsPkPassword,
-                PrDiff = prDiff,
                 AllowNonDefaultImages = mode != ModeOfOperation.Continuous, // HACK, fix it
-                CutoffDate = null,
                 HistoryS3Client = historyStorageS3Client,
                 InternalS3Client = internalS3Client,
                 InternalS3WebUrl = internalS3WebUrl,
                 DiffsBucketName = Environment.GetEnvironmentVariable("PLOGON_S3_DIFFS_BUCKET"),
                 HistoryBucketName = Environment.GetEnvironmentVariable("PLOGON_S3_HISTORY_BUCKET"),
+
+                // HACK, we don't know the API level a plugin is for before building it...
+                // Feels like a design flaw, but we can't do much about it until we change how
+                // packager works
+                CutoffDate = mode == ModeOfOperation.Continuous ? new DateTime(2023, 06, 10) : null,
             };
 
-            // HACK, we don't know the API level a plugin is for before building it...
-            // Feels like a design flaw, but we can't do much about it until we change how
-            // packager works
-            if (mode == ModeOfOperation.Continuous)
-            {
-                // API8 release
-                setup.CutoffDate = new DateTime(2023, 06, 10);
-            }
-
             var buildProcessor = new BuildProcessor(setup);
-            var tasks = buildProcessor.GetBuildTasks(mode == ModeOfOperation.Continuous);
+            var tasks = await buildProcessor.GetBuildTasksAsync(mode == ModeOfOperation.Continuous, prDiff);
             var taskToPrNumber = new Dictionary<BuildTask, int>();
 
             GitHubOutputBuilder.StartGroup("List all tasks");
@@ -244,25 +249,22 @@ class Program
 
                 foreach (var task in tasks)
                 {
-                    string? fancyCommit = null;
-                    var url = task.Manifest?.Plugin.Repository.Replace(".git", string.Empty);
-                    if (task.Manifest?.Plugin.Commit != null && url != null)
+                    if (task.Manifest == null)
+                         throw new Exception("Task had no manifest");
+
+                    var url = task.Manifest.Plugin.Repository.Replace(".git", string.Empty);
+                    var fancyCommit = task.Manifest.Plugin.Commit.Length > 7
+                                          ? task.Manifest.Plugin.Commit[..7]
+                                          : task.Manifest.Plugin.Commit;
+
+                    if (task.IsGitHub)
                     {
-                        fancyCommit = task.Manifest.Plugin.Commit.Length > 7
-                            ? task.Manifest.Plugin.Commit[..7]
-                            : task.Manifest.Plugin.Commit;
-
-                        if (task.IsGitHub)
-                        {
-                            fancyCommit = $"[{fancyCommit}]({url}/commit/{task.Manifest.Plugin.Commit})";
-                        }
-                        else if (task.IsGitLab)
-                        {
-                            fancyCommit = $"[{fancyCommit}]({url}/-/commit/{task.Manifest.Plugin.Commit})";
-                        }
+                        fancyCommit = $"[{fancyCommit}]({url}/commit/{task.Manifest.Plugin.Commit})";
                     }
-
-                    fancyCommit ??= "n/a";
+                    else if (task.IsGitLab)
+                    {
+                        fancyCommit = $"[{fancyCommit}]({url}/-/commit/{task.Manifest.Plugin.Commit})";
+                    }
 
                     if (aborted)
                     {
@@ -279,12 +281,18 @@ class Program
 
                     try
                     {
+                        // We'll override this with the PR body if we are committing
+                        var changelog = task.Manifest.Plugin.Changelog;
+
                         string? reviewer = null;
-                        var changelog = task.Manifest?.Plugin.Changelog;
+                        string? committingAuthor = null;
                         int? committingPrNum = null;
 
-                        var relevantCommitHashForWebServices = task.Manifest?.Plugin.Commit;
-                        
+                        var relevantCommitHashForWebServices = task.Manifest.Plugin.Commit;
+
+                        var manifestOwners = task.Manifest.Plugin.Owners.Union(PlogonSystemDefine.PacMembers);
+                        var isManifestOwner = manifestOwners.Any(x => x == githubActor);
+
                         // Removals do not have a manifest, so we need to use the have commit (as that is what we are removing)
                         if (task.Type == BuildTask.TaskType.Remove)
                         {
@@ -295,7 +303,7 @@ class Program
                         {
                             throw new Exception("No valid commit hash for task");
                         }
-                        
+
                         // When committing: Get the PR number for the merge to the manifest repo, and get the first approving reviewer
                         if (mode == ModeOfOperation.Commit)
                         {
@@ -305,21 +313,26 @@ class Program
                             Log.Verbose("PR number for {InternalName} ({Sha}): {PrNum}", task.InternalName, relevantCommitHashForWebServices, committingPrNum);
                             taskToPrNumber.Add(task, committingPrNum.Value);
 
+                            var prInfo = await gitHubApi!.GetPullRequestInfo(committingPrNum.Value);
                             if (string.IsNullOrEmpty(changelog))
                             {
-                                changelog = await gitHubApi!.GetIssueBody(committingPrNum.Value);
+                                changelog = prInfo.Body;
                             }
-                            
-                            reviewer = await gitHubApi!.GetReviewer(committingPrNum.Value);
-                            Log.Information("Reviewer for {InternalName} ({PrNum}): {Reviewer}", task.InternalName, committingPrNum.Value, reviewer);
+
+                            committingAuthor = prInfo.Author;
+
+                            reviewer = await gitHubApi.GetReviewer(committingPrNum.Value);
+                            Log.Information("Reviewer for {InternalName} ({PrNum} by {Author}): {Reviewer}", task.InternalName, committingPrNum.Value, committingAuthor, reviewer);
                         }
-                        // When building a PR: Register the PR number for the plugin with webservices so that we know what plugin update came from what PR
-                        else if (mode == ModeOfOperation.PullRequest)
+                        // When running as a PR: Register the PR number for the plugin with webservices so that we know what plugin update came from what PR
+                        // Only do this if we own the plugin, as we don't want to register PR numbers for plugins we don't own
+                        else if (mode == ModeOfOperation.PullRequest && isManifestOwner)
                         {
+                            Log.Information("Registering PR number for {InternalName} ({Sha}): {PrNum}", task.InternalName, relevantCommitHashForWebServices, prNumber);
                             await webservices.RegisterPrNumber(task.InternalName, relevantCommitHashForWebServices,
                                                                prNumber ?? throw new Exception("No PR number"));
                         }
-                        
+
                         if (task.Type == BuildTask.TaskType.Remove)
                         {
                             // If we are not committing, removal tasks don't do anything, and we should not consider them
@@ -329,7 +342,7 @@ class Program
                             GitHubOutputBuilder.StartGroup($"Remove {task.InternalName}");
                             Log.Information("Remove: {Name} - {Channel}", task.InternalName, task.Channel);
 
-                            var removeStatus = await buildProcessor.ProcessTask(task, true, null, reviewer, tasks);
+                            var removeStatus = await buildProcessor.ProcessTask(task, true, null, reviewer, committingAuthor, tasks);
                             allResults.Add(removeStatus);
 
                             if (removeStatus.Success)
@@ -345,10 +358,9 @@ class Program
                             continue;
                         }
 
-                        GitHubOutputBuilder.StartGroup($"Build {task.InternalName}[{task.Channel}] ({task.Manifest!.Plugin!.Commit})");
+                        GitHubOutputBuilder.StartGroup($"Build {task.InternalName}[{task.Channel}] ({task.Manifest.Plugin.Commit})");
 
-                        if (!buildAll && (task.Manifest.Plugin.Owners.All(x => x != githubActor) &&
-                                          PlogonSystemDefine.PacMembers.All(x => x != githubActor)))
+                        if (!buildAll && !isManifestOwner)
                         {
                             Log.Information("Not owned: {Name} - {Sha} (have {HaveCommit})", task.InternalName,
                                 task.Manifest.Plugin.Commit,
@@ -369,27 +381,27 @@ class Program
 
                         numTried++;
 
-                        var buildResult = await buildProcessor.ProcessTask(task, mode == ModeOfOperation.Commit, changelog, reviewer, tasks);
+                        var buildResult = await buildProcessor.ProcessTask(task, mode == ModeOfOperation.Commit, changelog, reviewer, committingAuthor, tasks);
                         allResults.Add(buildResult);
 
                         var mainDiffUrl = buildResult.Diff?.HosterUrl ?? buildResult.Diff?.RegularDiffLink;
+
+                        var linesAddedText = buildResult.Diff?.LinesAdded == null ? "?" : buildResult.Diff.LinesAdded.ToString();
+                        var prevVersionText = string.IsNullOrEmpty(buildResult.PreviousVersion)
+                                                  ? string.Empty
+                                                  : $", prev. {buildResult.PreviousVersion}";
+                        var diffLink = mainDiffUrl == null ? $"[Repo]({url}) <sup><sup>(New plugin)</sup></sup>" :
+                                           $"[Diff]({mainDiffUrl}) <sup><sub>({linesAddedText} lines{prevVersionText})</sub></sup>";
+                            
+                        if (buildResult.Diff?.SemanticDiffLink != null)
+                        {
+                            diffLink += $" - [Semantic]({buildResult.Diff.SemanticDiffLink})";
+                        }
                         
                         if (buildResult.Success)
                         {
                             Log.Information("Built: {Name} - {Sha} - {DiffUrl} +{LinesAdded} -{LinesRemoved}", task.InternalName,
                                 task.Manifest.Plugin.Commit, mainDiffUrl ?? "null", buildResult.Diff?.LinesAdded ?? -1, buildResult.Diff?.LinesRemoved ?? -1);
-
-                            var linesAddedText = buildResult.Diff?.LinesAdded == null ? "?" : buildResult.Diff.LinesAdded.ToString();
-                            var prevVersionText = string.IsNullOrEmpty(buildResult.PreviousVersion)
-                                ? string.Empty
-                                : $", prev. {buildResult.PreviousVersion}";
-                            var diffLink = mainDiffUrl == null ? $"[Repo]({url}) <sup><sup>(New plugin)</sup></sup>" :
-                                               $"[Diff]({mainDiffUrl}) <sup><sub>({linesAddedText} lines{prevVersionText})</sub></sup>";
-                            
-                            if (buildResult.Diff?.SemanticDiffLink != null)
-                            {
-                                diffLink += $" - [Semantic]({buildResult.Diff.SemanticDiffLink})";
-                            }
 
                             // We don't want to indicate success for continuous builds
                             if (mode != ModeOfOperation.Continuous)
@@ -429,12 +441,12 @@ class Program
                             {
                                 if (committingPrNum == null)
                                     throw new Exception("No PR number for commit");
-                                
+
                                 // Let's try getting the changelog again here in case we didn't get it the first time around
                                 if (string.IsNullOrEmpty(changelog) && repoName != null &&
                                     gitHubApi != null)
                                 {
-                                    changelog = await gitHubApi.GetIssueBody(committingPrNum.Value);
+                                    (_, changelog) = await gitHubApi.GetPullRequestInfo(committingPrNum.Value);
                                 }
 
                                 // await webservices.StagePluginBuild(new WebServices.StagedPluginInfo
@@ -456,7 +468,7 @@ class Program
                                 task.Manifest.Plugin.Commit);
 
                             buildsMd.AddRow("❌", $"{task.InternalName} [{task.Channel}]", fancyCommit,
-                                $"Build failed ([Diff]({mainDiffUrl}))");
+                                $"Build failed - {diffLink}");
                             numFailed++;
                         }
                     }
@@ -527,7 +539,7 @@ class Program
                 {
                     if (prNumber == null)
                         throw new Exception("PR number not set");
-                    
+
                     var existingMessages = await webservices.GetMessageIds(prNumber.Value);
                     var alreadyPosted = existingMessages.Length > 0;
 
@@ -540,7 +552,19 @@ class Program
                     if (!anyTried)
                         commentText =
                             "⚠️ No builds attempted! This probably means that your owners property is misconfigured.";
-                    
+
+                    var tasksWithChangedOwners = tasks.Where(x => x.OldOwners != null).ToList();
+                    if (tasksWithChangedOwners.Count != 0)
+                    {
+                        commentText +=
+                            "\n\n<br>\n\n⚠️ **New owners detected!** Please make sure that the old owners are aware of the changes and have reviewed them.";
+                        foreach (var task in tasksWithChangedOwners)
+                        {
+                            commentText += $"\n* **{task.InternalName}** - {string.Join(", ", task.OldOwners!)} => {string.Join(", ", task.Manifest.Plugin.Owners)}";
+                        }
+                        commentText += "\n\n<br>\n\n";
+                    }
+                  
                     var crossOutTask = gitHubApi?.CrossOutAllOfMyComments(prNumber.Value);
 
                     var anyComments = true;
@@ -563,7 +587,7 @@ class Program
                     }
 
                     // List needs in detail
-                    var allNeeds = allResults.SelectMany(x => x.Needs).ToList();
+                    var allNeeds = allResults.SelectMany(x => x.Needs).Distinct().ToList();
                     var needsText = string.Empty;
                     if (allNeeds.Count > 0)
                     {
@@ -571,7 +595,7 @@ class Program
                         {
                             return count == 1 ? singular : singular + "s";
                         }
-                        
+
                         var numUnreviewed = 0;
                         var numHidden = 0;
                         var needsTable = MarkdownTableBuilder.Create("Type", "Name", "Version", "Reviewed by");
@@ -585,7 +609,13 @@ class Program
                                     numHidden++;
                                     continue;
                                 }
-                                
+
+                                if (PlogonSystemDefine.SafeNugetPackages.Any(x => name.Equals(x)))
+                                {
+                                    numHidden++;
+                                    continue;
+                                }
+
                                 name = $"[{need.Name}](https://www.nuget.org/packages/{need.Name})";
                             }
 
@@ -593,11 +623,11 @@ class Program
                             if (need.OldVersion != null)
                             {
                                 unreviewedText = $"Upd. from {need.OldVersion}";
-                                
+
                                 if (need.DiffUrl != null)
                                     unreviewedText = $"[{unreviewedText}]({need.DiffUrl})";
                             }
-                            
+
                             needsTable.AddRow(
                                 need.Type.ToString(),
                                 name,
@@ -611,17 +641,17 @@ class Program
                         var hiddenText = string.Empty;
                         if (numHidden > 0)
                             hiddenText = $"\n\n##### {numHidden} hidden {Pluralize(numHidden, "need")} (known safe NuGet packages).\n";
-                        
-                        needsText = 
-                            $"\n\n<details>\n<summary>{allNeeds.Count} {Pluralize(allNeeds.Count, "Need")} " + 
+
+                        needsText =
+                            $"\n\n<details>\n<summary>{allNeeds.Count} {Pluralize(allNeeds.Count, "Need")} " +
                             (numUnreviewed > 0 ? $"(⚠️ {numUnreviewed} UNREVIEWED)" : "(✅ All reviewed)") +
                             "</summary>\n\n" + needsTable.GetText() + hiddenText +
                             "</details>\n\n";
-                        
+
                         if (numHidden == allNeeds.Count)
                             needsText = hiddenText;
                     }
-                    
+
                     var commentTask = gitHubApi?.AddComment(prNumber.Value,
                         commentText + mergeTimeText + "\n\n" + buildsMd + needsText + "\n##### " + links);
 
@@ -635,9 +665,9 @@ class Program
                     {
                         hookTitle += " created";
 
-                        var prDesc = await gitHubApi!.GetIssueBody(prNumber.Value);
-                        if (!string.IsNullOrEmpty(prDesc))
-                            buildInfo += $"```\n{prDesc}\n```\n";
+                        var (_, prBody) = await gitHubApi!.GetPullRequestInfo(prNumber.Value);
+                        if (!string.IsNullOrEmpty(prBody))
+                            buildInfo += $"```\n{prBody}\n```\n";
                     }
                     else
                     {
@@ -687,7 +717,7 @@ class Program
 
                         if (!taskToPrNumber.TryGetValue(buildResult.Task, out var resultPrNum))
                         {
-                            throw new Exception($"No PR number for commit {buildResult.Task.InternalName} - {buildResult.Task.Manifest!.Plugin.Commit}");
+                            throw new Exception($"No PR number for commit {buildResult.Task.InternalName} - {buildResult.Task.Manifest.Plugin.Commit}");
                         }
                         try
                         {
@@ -785,8 +815,8 @@ class Program
                           {
                               { gitHubApi.RepoOwner, gitHubApi.RepoName },
                           },
-                          Is = new[] { IssueIsQualifier.PullRequest },
-                          Labels = new[] { PlogonSystemDefine.PR_LABEL_NEW_PLUGIN },
+                          Is = [ IssueIsQualifier.PullRequest ],
+                          Labels = [ PlogonSystemDefine.PR_LABEL_NEW_PLUGIN ],
                           SortField = IssueSearchSort.Created,
                       });
         var lastNewPluginPr = result?.Items.FirstOrDefault(x => x.Number != prNumber);
