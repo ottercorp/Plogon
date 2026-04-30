@@ -289,7 +289,8 @@ public class GitHubApi
             managedLabels.Add(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
         else
             managedLabels.Remove(PlogonSystemDefine.PR_LABEL_SIZE_LARGE);
-        
+
+        /*
         if (label.HasFlag(PrLabel.PendingCodeReview))
             managedLabels.Add(PlogonSystemDefine.PR_LABEL_PENDING_CODE_REVIEW);
         else
@@ -304,6 +305,7 @@ public class GitHubApi
             managedLabels.Add(PlogonSystemDefine.PR_LABEL_PENDING_TESTING);
         else
             managedLabels.Remove(PlogonSystemDefine.PR_LABEL_PENDING_TESTING);
+*/
 
         await this.ghClient.Issue.Labels.ReplaceAllForIssue(repoOwner, repoName, issueNumber, managedLabels.ToArray());
     }
